@@ -14,12 +14,16 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { jsx } from 'react/jsx-runtime'
 import { ContextMenu, menuItemsFor } from './menu.jsx'
-import { DeleteDialog, OverwriteDialog, RenameDialog, SaveAsDialog } from './dialogs.jsx'
+import { DeleteDialog, OverwriteDialog, SaveAsDialog } from './dialogs.jsx'
 import { findRow } from './controller.js'
 import { IconAt } from './icons.jsx'
 
 /**
  * Track one row's on-screen box, following scroll and layout changes.
+ *
+ * The box starts as `null` and is filled by a layout effect on mount. Callers
+ * must treat the first `null` as "not measured yet" rather than "row gone";
+ * `measureRow` below reports which it is.
  *
  * @param {string | null} path - the row's absolute path, or null.
  * @param {number} revision - bumped by the controller on any tree mutation.
@@ -126,26 +130,52 @@ function InlineRename({ entry, revision, busy, onCommit, onCancel, error, t }) {
   const box = useRowBox(entry.path, revision)
   const [value, setValue] = useState(entry.name)
   const inputRef = useRef(null)
+  /**
+   * A row is only "gone" after it has been looked for at least once and not
+   * found. The box is `null` before the first layout effect runs, so treating a
+   * null box as "gone" would cancel the editor before it ever rendered.
+   */
+  const [rowMissing, setRowMissing] = useState(false)
 
   useEffect(() => {
     setValue(entry.name)
   }, [entry.name, entry.path])
 
+  // Focus the input once it actually exists in the document. On the first render
+  // the box is null and the component returns null, so the ref attaches only
+  // after the layout effect reports a measured row.
+  const focusedRef = useRef(false)
   useEffect(() => {
     const input = inputRef.current
     if (!(input instanceof HTMLInputElement)) return
+    if (focusedRef.current) return
+    focusedRef.current = true
     input.focus()
     const dot = entry.name.lastIndexOf('.')
     if (dot > 0) input.setSelectionRange(0, dot)
     else input.select()
-  }, [entry.name])
+  }, [box, entry.name])
 
-  if (box === null) {
-    // The row vanished (collapsed directory, refresh): close instead of
-    // floating an editor over unrelated content.
-    onCancel()
-    return null
-  }
+  useEffect(() => {
+    if (box === null) {
+      // Look once more: if the row is truly absent, close rather than float an
+      // editor over unrelated content. Runs in an effect, never during render,
+      // because a setState while rendering makes React drop the update.
+      setRowMissing(findRow(entry.path) === null)
+      return
+    }
+    setRowMissing(false)
+  }, [box, entry.path])
+
+  useEffect(() => {
+    if (rowMissing) onCancel()
+  }, [onCancel, rowMissing])
+
+  // The box is filled by a layout effect, so the first render has none. Waiting
+  // one frame to render the input at a measured position is safer than reading
+  // `box.left` before it exists.
+  if (box === null) return null
+  if (rowMissing) return null
 
   return jsx('input', {
     ref: inputRef,
@@ -161,14 +191,32 @@ function InlineRename({ entry, revision, busy, onCommit, onCancel, error, t }) {
       height: `${String(Math.max(20, box.height - 2))}px`,
     },
     onChange: (event) => setValue(event.target.value),
-    onBlur: () => {
+    onBlur: (event) => {
       // A click elsewhere is a cancel, matching the tree's own click behaviour.
-      if (!busy) onCancel()
+      //
+      // Two cases must NOT cancel: a blur that arrives while the commit is in
+      // flight (focus moved for a reason the user did not choose), and a blur
+      // whose focus target is still inside the plugin's own overlay — the tree
+      // and the composer both take focus for their own reasons.
+      if (busy) return
+      const next = event.relatedTarget
+      if (next instanceof Node && document.querySelector('.dfx-root')?.contains(next)) return
+      // `document.activeElement` may still be the editor at blur time; if focus
+      // did not land outside the plugin's overlay, treat it as a dismissal only
+      // when the user actually moved somewhere unrelated.
+      const active = document.activeElement
+      if (active instanceof HTMLElement && document.querySelector('.dfx-root')?.contains(active)) return
+      onCancel()
     },
     onKeyDown: (event) => {
       if (event.key === 'Enter') {
         event.preventDefault()
-        const name = value.trim()
+        // Read the live value from the element rather than React state: state
+        // lags behind a programmatic write, and committing the stale value would
+        // send the file's current name and look like a silent no-op.
+        const input = event.currentTarget
+        const name = (input instanceof HTMLInputElement ? input.value : value).trim()
+        setValue(name)
         if (name === '' || name === entry.name) {
           onCancel()
           return
@@ -228,7 +276,7 @@ export function Overlay({ controller }) {
     ? []
     : menuItemsFor({
       kind: state.menu.kind,
-      canReveal: state.capabilities?.reveal !== false,
+      canReveal: state.canReveal !== false,
       canAddToChat: controller.canAddToChat(),
     }).map((item) => (item.kind === 'separator'
       ? item
@@ -237,7 +285,6 @@ export function Overlay({ controller }) {
         label: t(item.labelKey),
         hint: item.hintKey === undefined ? undefined : t(item.hintKey),
       }))
-
   const onActivate = useCallback((item) => {
     controller.runMenuAction(item.action)
   }, [controller])
@@ -303,15 +350,6 @@ function renderDialog(state, controller, t) {
       permanent: dialog.permanent === true,
       busy: state.busy,
       onConfirm: (permanent) => controller.confirmDelete(permanent),
-      onCancel: () => controller.closeDialog(),
-      t,
-    })
-  }
-  if (dialog.kind === 'rename') {
-    return jsx(RenameDialog, {
-      entry,
-      busy: state.busy,
-      onConfirm: (name) => controller.confirmRename(name),
       onCancel: () => controller.closeDialog(),
       t,
     })

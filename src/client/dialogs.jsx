@@ -1,9 +1,10 @@
 /**
- * The plugin's dialogs: delete confirmation, rename, and save-as.
+ * The plugin's dialogs: delete confirmation, save-as, and overwrite.
  *
  * Each is a small controlled component rendered into the plugin's overlay. They
  * share one shell so focus handling, Escape, and the button row behave the same
- * everywhere.
+ * everywhere. Rename is deliberately absent: it is an inline editor over the row
+ * rather than a modal, so it lives in `overlay.jsx`.
  *
  * @module dsh-file-extension/client/dialogs
  */
@@ -166,89 +167,6 @@ export function DeleteDialog({ entry, permanent, busy, onConfirm, onCancel, t })
  * @param {(key: string, vars?: object) => string} props.t - translate.
  * @returns {unknown} the dialog.
  */
-export function RenameDialog({ entry, busy, onConfirm, onCancel, t }) {
-  const [value, setValue] = useState(entry.name)
-  const [error, setError] = useState(null)
-
-  // Select the stem, not the extension: renaming a file almost always means
-  // changing the name and keeping the suffix.
-  const inputRef = useRef(null)
-  useEffect(() => {
-    const input = inputRef.current
-    if (!(input instanceof HTMLInputElement)) return
-    input.focus()
-    const dot = entry.name.lastIndexOf('.')
-    if (dot > 0) input.setSelectionRange(0, dot)
-    else input.select()
-  }, [entry.name])
-
-  const submit = useCallback(() => {
-    const name = value.trim()
-    if (name === '') {
-      setError(t('error.empty'))
-      return
-    }
-    if (name === entry.name) {
-      onCancel()
-      return
-    }
-    setError(null)
-    onConfirm(name)
-  }, [entry.name, onCancel, onConfirm, t, value])
-
-  return jsx(Dialog, {
-    title: t('dialog.rename.title'),
-    onCancel,
-    children: [
-      jsx('div', {
-        key: 'field',
-        className: 'dfx-dialog-field',
-        children: [
-          jsx('label', { key: 'label', className: 'dfx-dialog-label', children: t('dialog.rename.label') }),
-          jsx('input', {
-            key: 'input',
-            ref: inputRef,
-            className: 'dfx-input',
-            value,
-            'data-invalid': error === null ? undefined : 'true',
-            disabled: busy,
-            onChange: (event) => {
-              setValue(event.target.value)
-              setError(null)
-            },
-            onKeyDown: (event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault()
-                submit()
-              }
-            },
-          }),
-        ],
-      }),
-      jsx('div', { key: 'hint', className: 'dfx-dialog-hint', children: error ?? '' }),
-    ],
-    actions: [
-      jsx('button', {
-        key: 'cancel',
-        type: 'button',
-        className: 'dfx-button',
-        disabled: busy,
-        onClick: onCancel,
-        children: t('dialog.cancel'),
-      }),
-      jsx('button', {
-        key: 'confirm',
-        type: 'button',
-        className: 'dfx-button',
-        'data-primary': 'true',
-        disabled: busy,
-        onClick: submit,
-        children: t('dialog.rename.confirm'),
-      }),
-    ],
-  })
-}
-
 /**
  * Save a copy: name plus destination folder.
  *

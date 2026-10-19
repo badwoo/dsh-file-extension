@@ -48,10 +48,18 @@ export function createController(deps) {
     revision: 0,
     /** Host capabilities, once read. */
     capabilities: null,
+    /**
+     * Whether the deployment can reveal a path in a file manager.
+     * `null` until the session Remote has answered, so a menu that opens before
+     * the answer arrives does not wrongly disable the row.
+     */
+    canReveal: null,
   })
 
   let toastSeq = 0
   const timers = new Set()
+  /** The one in-flight capabilities read, shared by concurrent callers. */
+  let capabilitiesInFlight
 
   /**
    * Show one transient message.
@@ -101,16 +109,34 @@ export function createController(deps) {
   }
 
   /**
-   * Load the Host capabilities once, refreshing the snapshot when they arrive.
+   * Read both host capabilities and the reveal answer, caching each for the
+   * page. Both reads resolve before returning, so a caller can read the snapshot
+   * straight after awaiting this.
    *
-   * @returns {Promise<object | null>} the capabilities.
+   * A failed read leaves its slot `null` and is retried on the next call, so a
+   * transient failure does not permanently disable a row.
+   *
+   * @returns {Promise<void>} settles once the snapshot is current.
    */
   const ensureCapabilities = async () => {
-    const known = store.get().capabilities
-    if (known !== null) return known
-    const value = await hostCapabilities()
-    if (value !== null) store.set({ capabilities: value })
-    return value
+    // A single in-flight call serves concurrent callers: two menu opens racing
+    // must not both fetch.
+    if (capabilitiesInFlight === undefined) {
+      const known = store.get().capabilities
+      const revealKnown = store.get().canReveal
+      capabilitiesInFlight = Promise.all([
+        known === null ? hostCapabilities() : null,
+        revealKnown === null && typeof deps.canReveal === 'function' ? deps.canReveal() : null,
+      ]).then(([host, reveal]) => {
+        const patch = {}
+        if (host !== null && host !== undefined) patch.capabilities = host
+        if (reveal !== null && reveal !== undefined) patch.canReveal = reveal
+        if (Object.keys(patch).length > 0) store.set(patch)
+      }).finally(() => {
+        capabilitiesInFlight = undefined
+      })
+    }
+    await capabilitiesInFlight
   }
 
   /** Whether a composer is available to receive a mention. */
@@ -149,6 +175,10 @@ export function createController(deps) {
    * Insert an `@path` mention at the composer caret without disturbing the rest
    * of the draft.
    *
+   * `captureInsertion()` returns a revision-guarded `TokenSpan` (`start`, `end`,
+   * `draftRev`); `insertText` refuses the write when the draft moved on, which is
+   * what keeps a concurrent edit from being clobbered.
+   *
    * @param {object} entry - the row entry.
    * @returns {boolean} whether the mention was inserted.
    */
@@ -161,10 +191,14 @@ export function createController(deps) {
     const relative = relativeTo(entry.path, deps.workspaceRoot())
     const mention = mentionFor(relative)
     const span = composer.captureInsertion()
-    // A space before the token keeps it a separate mention when the caret sits
-    // directly after other text.
+    // Keep the token separate from preceding text: `@` only starts a mention at
+    // the beginning of the draft or after whitespace, so a caret sitting right
+    // after a word would otherwise produce an ordinary `word@path`.
     const draft = composer.state?.getSnapshot?.()?.draft
-    const needsSpace = typeof draft === 'string' && draft.length > 0 && !/[\s]$/u.test(draft.slice(0, span?.offset ?? draft.length))
+    const before = typeof draft === 'string' && span !== undefined && typeof span.start === 'number'
+      ? draft.slice(0, span.start)
+      : ''
+    const needsSpace = before.length > 0 && !/\s$/u.test(before)
     const ok = composer.insertText(`${needsSpace ? ' ' : ''}${mention}`, span)
     if (!ok) {
       toast(t('toast.addedToChatFailed'), 'error')
@@ -239,7 +273,9 @@ export function createController(deps) {
         return
       }
       case 'rename':
-        store.set({ dialog: { kind: 'rename', entry }, renameError: null })
+        // The task calls for in-place editing, so the row itself becomes an
+        // input rather than a modal opening over it.
+        startInlineRename(entry)
         return
       case 'delete':
         await openDeleteDialog(entry)
@@ -258,8 +294,11 @@ export function createController(deps) {
    * @param {object} entry - the row entry.
    */
   const openDeleteDialog = async (entry) => {
-    const capabilities = await ensureCapabilities()
-    const trashSupported = capabilities?.trash?.supported === true
+    await ensureCapabilities()
+    // Read the snapshot after the await: `null` trash means the answer has not
+    // arrived yet, and opening a "permanent" dialog on a guess is worse than
+    // assuming the ordinary bin and correcting it if the delete is refused.
+    const trashSupported = store.get().capabilities?.trash?.supported === true
     store.set({
       dialog: {
         kind: 'delete',
@@ -275,14 +314,17 @@ export function createController(deps) {
    * @param {object} entry - the row entry.
    */
   const openSaveAsDialog = async (entry) => {
-    const capabilities = await ensureCapabilities()
+    await ensureCapabilities()
     const info = await api.stat(entry.path, deps.sessionId())
     const bytes = info.ok ? Number(info.value.bytes ?? 0) : undefined
+    // The directory picker plus the Host write is the desktop/self-hosted path;
+    // anywhere else the dialog falls back to a browser download.
+    const canWrite = store.get().capabilities?.saveAs === 'directory-picker'
     store.set({
       dialog: {
         kind: 'saveAs',
         entry: { ...entry, bytes },
-        canWrite: capabilities?.saveAs === 'directory-picker',
+        canWrite,
       },
     })
   }
@@ -311,8 +353,16 @@ export function createController(deps) {
     }
     if (result.details?.trashUnavailable === true) {
       // The recycle bin turned out to be unreachable: re-ask with the red
-      // warning rather than silently deleting anything.
+      // warning rather than silently deleting anything. The cached capability is
+      // dropped so the next menu open re-probes, and a permanent fallback that is
+      // disabled by configuration surfaces as an error instead.
       invalidateCapabilities()
+      const allowPermanent = result.details?.disabled === true ? false : true
+      if (!allowPermanent) {
+        store.set({ busy: false, capabilities: null })
+        toast(t('error.unsupported'), 'error')
+        return
+      }
       store.set({
         busy: false,
         capabilities: null,
@@ -324,29 +374,16 @@ export function createController(deps) {
     toast(describeFailure(result), 'error')
   }
 
-  /**
-   * Confirm a rename from the dialog.
-   *
-   * @param {string} name - the new name.
-   */
-  const confirmRename = async (name) => {
-    const dialog = store.get().dialog
-    if (dialog === null || dialog.kind !== 'rename') return
-    store.set({ busy: true })
-    const result = await api.rename(dialog.entry.path, name, deps.sessionId())
-    if (result.ok) {
-      store.set({ dialog: null, busy: false })
-      toast(t('toast.renameSuccess', { name }), 'success')
-      deps.afterMutation()
-      return
-    }
-    store.set({ busy: false })
-    toast(describeFailure(result), 'error')
-  }
-
   /** Start an inline rename on the row that opened the menu. */
   const startInlineRename = (entry) => {
-    store.set({ renaming: { path: entry.path, name: entry.name, kind: entry.kind }, renameError: null })
+    // A hover button over the row being renamed would fight the input for the
+    // same pixels, so it is cleared at the same time.
+    store.set({
+      renaming: { path: entry.path, name: entry.name, kind: entry.kind },
+      renameError: null,
+      menu: null,
+      hover: null,
+    })
   }
 
   /** Abandon the inline rename. */
@@ -505,7 +542,6 @@ export function createController(deps) {
     ensureCapabilities,
     closeDialog,
     confirmDelete,
-    confirmRename,
     startInlineRename,
     cancelInlineRename,
     commitInlineRename,

@@ -243,23 +243,47 @@ try {
   const rowCount = await evaluate(cdp, sessionId, `document.querySelectorAll('[data-files-entry][data-files-path]').length`)
   console.log(`   file rows rendered: ${String(rowCount)}`)
 
-  console.log('\n[3] right-click a file row')
-  const menuResult = await evaluate(cdp, sessionId, `(async () => {
-    const row = document.querySelector('[data-files-entry="file"][data-files-path]');
-    if (row === null) return { error: 'no file row' };
+  // Pick a stable row. The test harness's own log file is written continuously by
+  // the running server, so its directory watch invalidates the row mid-test and
+  // the tree re-renders it; any editor tracking it would then vanish.
+  const STABLE_ROW = `(() => {
+    const rows = [...document.querySelectorAll('[data-files-entry="file"][data-files-path]')];
+    const core = rows.find((r) => /(?:^|\\/)(?:README\\.(?:md|zh\\.md)|package\\.json|LICENSE)$/.test(r.dataset.filesPath));
+    return (core ?? rows[0])?.dataset.filesPath ?? null;
+  })()`
+  const rowPath = await evaluate(cdp, sessionId, STABLE_ROW)
+  console.log(`   stable row: ${String(rowPath)}`)
+
+  /**
+   * Open the context menu on the stable row. Shared by every step so the same
+   * entry is used throughout.
+   *
+   * @returns {*} the menu's rows and the row's path.
+   */
+  const openMenuOnRow = () => evaluate(cdp, sessionId, `(async () => {
+    const wanted = ${JSON.stringify(rowPath)};
+    const rows = [...document.querySelectorAll('[data-files-entry="file"][data-files-path]')];
+    const row = (wanted === null ? null : rows.find((r) => r.dataset.filesPath === wanted)) ?? rows[0];
+    if (row === undefined || row === null) return { error: 'no file row' };
     const rect = row.getBoundingClientRect();
-    const x = rect.left + rect.width / 2;
-    const y = rect.top + rect.height / 2;
-    row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 2 }));
-    await new Promise((r) => setTimeout(r, 400));
+    row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: rect.left + 20, clientY: rect.top + 5, button: 2 }));
+    await new Promise((r) => setTimeout(r, 500));
+    return { path: row.dataset.filesPath, menu: document.querySelector('.dfx-menu') !== null };
+  })()`)
+
+  console.log('\n[3] right-click a file row')
+  const openedMenu = await openMenuOnRow()
+  const menuResult = await evaluate(cdp, sessionId, `(() => {
     const menu = document.querySelector('.dfx-menu');
     return {
       menuPresent: menu !== null,
       items: menu === null ? [] : [...menu.querySelectorAll('.dfx-menu-item')].map((i) => i.textContent.trim()),
       role: menu?.getAttribute('role') ?? null,
-      path: row.dataset.filesPath,
     };
   })()`)
+  if (openedMenu.error !== undefined) {
+    console.log('   open failed:', JSON.stringify(openedMenu))
+  }
   console.log('   menu:', JSON.stringify(menuResult, null, 2))
   check('custom menu appeared', menuResult.menuPresent === true, JSON.stringify(menuResult))
   check('menu has role=menu', menuResult.role === 'menu')
@@ -280,14 +304,16 @@ try {
 
   console.log('\n[5] outside click closes the menu')
   const outsideResult = await evaluate(cdp, sessionId, `(async () => {
-    const row = document.querySelector('[data-files-entry="file"][data-files-path]');
-    if (row === null) return { error: 'no file row' };
+    const wanted = ${JSON.stringify(rowPath)};
+    const rows = [...document.querySelectorAll('[data-files-entry="file"][data-files-path]')];
+    const row = (wanted === null ? null : rows.find((r) => r.dataset.filesPath === wanted)) ?? rows[0];
+    if (row === undefined || row === null) return { error: 'no file row' };
     const rect = row.getBoundingClientRect();
     row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: rect.left + 20, clientY: rect.top + 5, button: 2 }));
-    await new Promise((r) => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 500));
     const opened = document.querySelector('.dfx-menu') !== null;
     document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }));
-    await new Promise((r) => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 400));
     return { opened, closedAfterOutsideClick: document.querySelector('.dfx-menu') === null };
   })()`)
   check('menu opened before outside click', outsideResult.opened === true, JSON.stringify(outsideResult))
@@ -295,10 +321,12 @@ try {
 
   console.log('\n[6] hover @ button')
   const hoverResult = await evaluate(cdp, sessionId, `(async () => {
-    const row = document.querySelector('[data-files-entry="file"][data-files-path]');
-    if (row === null) return { error: 'no file row' };
+    const wanted = ${JSON.stringify(rowPath)};
+    const rows = [...document.querySelectorAll('[data-files-entry="file"][data-files-path]')];
+    const row = (wanted === null ? null : rows.find((r) => r.dataset.filesPath === wanted)) ?? rows[0];
+    if (row === undefined || row === null) return { error: 'no file row' };
     row.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true }));
-    await new Promise((r) => setTimeout(r, 400));
+    await new Promise((r) => setTimeout(r, 500));
     const button = document.querySelector('.dfx-row-at');
     return {
       present: button !== null,
@@ -312,28 +340,47 @@ try {
 
   console.log('\n[7] menu is not the native one (no default menu in headless, but check the handler ran)')
   const prevented = await evaluate(cdp, sessionId, `(() => {
-    const row = document.querySelector('[data-files-entry="file"][data-files-path]');
-    if (row === null) return { error: 'no file row' };
+    const wanted = ${JSON.stringify(rowPath)};
+    const rows = [...document.querySelectorAll('[data-files-entry="file"][data-files-path]')];
+    const row = (wanted === null ? null : rows.find((r) => r.dataset.filesPath === wanted)) ?? rows[0];
+    if (row === undefined || row === null) return { error: 'no file row' };
     const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10, button: 2 });
     row.dispatchEvent(event);
     return { defaultPrevented: event.defaultPrevented };
   })()`)
   check('contextmenu default prevented', prevented.defaultPrevented === true, JSON.stringify(prevented))
 
-  console.log('\n[8] delete dialog wording (recycle bin vs permanent)')
-  const dialogResult = await evaluate(cdp, sessionId, `(async () => {
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-    await new Promise((r) => setTimeout(r, 200));
-    const row = document.querySelector('[data-files-entry="file"][data-files-path]');
-    if (row === null) return { error: 'no file row' };
+  /**
+   * Open the context menu on the stable row and click one item by its label.
+   *
+   * The row is located by scanning rows and comparing `data-files-path` exactly.
+   * A Windows path is not valid inside a CSS attribute selector — the
+   * backslashes in `[data-files-path="D:\a\b"]` make `querySelector` throw or
+   * silently fail to match.
+   *
+   * @param {RegExp} matcher - matches the row's translated label.
+   * @returns {Promise<object>} which row was clicked, or why none was.
+   */
+  const clickMenuRow = (matcher) => evaluate(cdp, sessionId, `(async () => {
+    const wanted = ${JSON.stringify(rowPath)};
+    const rows = [...document.querySelectorAll('[data-files-entry="file"][data-files-path]')];
+    const row = (wanted === null ? null : rows.find((r) => r.dataset.filesPath === wanted)) ?? rows[0];
+    if (row === undefined || row === null) return { error: 'no file row' };
     const rect = row.getBoundingClientRect();
     row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: rect.left + 20, clientY: rect.top + 5, button: 2 }));
     await new Promise((r) => setTimeout(r, 500));
     const items = [...document.querySelectorAll('.dfx-menu-item')];
-    const del = items.find((i) => (i.textContent || '').toLowerCase().includes('delete') || (i.textContent || '').includes('删除'));
-    if (del === undefined) return { error: 'no delete row', items: items.map((i) => i.textContent.trim()) };
-    del.click();
-    await new Promise((r) => setTimeout(r, 1200));
+    const match = ${String(matcher)};
+    const target = items.find((i) => match.test(i.textContent || ''));
+    if (target === undefined) return { error: 'no matching row', items: items.map((i) => i.textContent.trim()) };
+    target.click();
+    return { clicked: target.textContent.trim(), path: row.dataset.filesPath };
+  })()`)
+
+  console.log('\n[8] delete dialog wording (recycle bin vs permanent)')
+  const deleteOpen = await clickMenuRow(/delete|删除/u)
+  await new Promise((resolve) => setTimeout(resolve, 1200))
+  const dialogResult = await evaluate(cdp, sessionId, `(() => {
     const dialog = document.querySelector('.dfx-dialog');
     return {
       dialogPresent: dialog !== null,
@@ -341,44 +388,75 @@ try {
       danger: dialog?.querySelector('.dfx-dialog-body')?.getAttribute('data-danger') ?? null,
     };
   })()`)
+  if (deleteOpen.error !== undefined) console.log('   open failed:', JSON.stringify(deleteOpen))
   console.log('   delete dialog:', JSON.stringify(dialogResult, null, 2))
   check('delete dialog opened', dialogResult.dialogPresent === true, JSON.stringify(dialogResult))
 
-  console.log('\n[9] rename dialog reachable from the menu')
-  const renameResult = await evaluate(cdp, sessionId, `(async () => {
-    // Close any dialog first.
+  console.log('\n[9] rename opens an inline editor over the row')
+  await evaluate(cdp, sessionId, `(() => {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-    await new Promise((r) => setTimeout(r, 300));
-    const row = document.querySelector('[data-files-entry="file"][data-files-path]');
-    if (row === null) return { error: 'no file row' };
-    const rect = row.getBoundingClientRect();
-    row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: rect.left + 20, clientY: rect.top + 5, button: 2 }));
-    await new Promise((r) => setTimeout(r, 400));
-    const items = [...document.querySelectorAll('.dfx-menu-item')];
-    const ren = items.find((i) => (i.textContent || '').toLowerCase().includes('rename') || (i.textContent || '').includes('重命名'));
-    if (ren === undefined) return { error: 'no rename row', items: items.map((i) => i.textContent.trim()) };
-    ren.click();
-    await new Promise((r) => setTimeout(r, 500));
-    const input = document.querySelector('.dfx-dialog input.dfx-input');
-    return { dialogPresent: document.querySelector('.dfx-dialog') !== null, hasInput: input !== null, value: input?.value ?? null };
   })()`)
-  console.log('   rename dialog:', JSON.stringify(renameResult, null, 2))
-  check('rename dialog has a name input', renameResult.hasInput === true, JSON.stringify(renameResult))
+  const renameClicked = await clickMenuRow(/rename|重命名/u)
+  await new Promise((resolve) => setTimeout(resolve, 900))
+  const renameResult = await evaluate(cdp, sessionId, `(() => {
+    const input = document.querySelector('.dfx-rename-input');
+    return {
+      hasInlineInput: input !== null,
+      focused: document.activeElement === input,
+      value: input?.value ?? null,
+      noDialog: document.querySelector('.dfx-dialog') === null,
+    };
+  })()`)
+  if (renameClicked.error !== undefined) console.log('   open failed:', JSON.stringify(renameClicked))
+  console.log('   inline rename:', JSON.stringify(renameResult, null, 2))
+  check('rename puts an inline editor on the row', renameResult.hasInlineInput === true, JSON.stringify(renameResult))
+  check('inline rename input is focused', renameResult.focused === true, JSON.stringify(renameResult))
 
-  console.log('\n[10] save-as dialog')
-  const saveResult = await evaluate(cdp, sessionId, `(async () => {
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-    await new Promise((r) => setTimeout(r, 300));
-    const row = document.querySelector('[data-files-entry="file"][data-files-path]');
-    if (row === null) return { error: 'no file row' };
-    const rect = row.getBoundingClientRect();
-    row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: rect.left + 20, clientY: rect.top + 5, button: 2 }));
+  console.log('\n[10] Escape cancels the inline rename')
+  const renameEscape = await evaluate(cdp, sessionId, `(async () => {
+    const input = document.querySelector('.dfx-rename-input');
+    if (input === null) return { error: 'no inline input' };
+    input.focus();
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
     await new Promise((r) => setTimeout(r, 400));
-    const items = [...document.querySelectorAll('.dfx-menu-item')];
-    const save = items.find((i) => (i.textContent || '').toLowerCase().includes('save') || (i.textContent || '').includes('另存为'));
-    if (save === undefined) return { error: 'no save row', items: items.map((i) => i.textContent.trim()) };
-    save.click();
-    await new Promise((r) => setTimeout(r, 1500));
+    return { gone: document.querySelector('.dfx-rename-input') === null };
+  })()`)
+  check('Escape closes the inline rename', renameEscape.gone === true, JSON.stringify(renameEscape))
+
+  console.log('\n[11] an illegal inline name is refused and the editor stays')
+  await evaluate(cdp, sessionId, `(() => {
+    document.querySelector('.dfx-rename-input')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  })()`)
+  const invalidOpen = await clickMenuRow(/rename|重命名/u)
+  await new Promise((resolve) => setTimeout(resolve, 900))
+  const renameInvalid = await evaluate(cdp, sessionId, `(async () => {
+    const input = document.querySelector('.dfx-rename-input');
+    if (input === null) return { error: 'no inline input' };
+    const before = document.querySelectorAll('[data-files-entry="file"][data-files-path]').length;
+    input.focus();
+    input.value = 'bad<name>.txt';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 2000));
+    return {
+      stillOpen: document.querySelector('.dfx-rename-input') !== null,
+      fileCountBefore: before,
+      fileCountAfter: document.querySelectorAll('[data-files-entry="file"][data-files-path]').length,
+      hasError: input.getAttribute('data-invalid') === 'true',
+    };
+  })()`)
+  if (invalidOpen.error !== undefined) console.log('   open failed:', JSON.stringify(invalidOpen))
+  console.log('   invalid rename:', JSON.stringify(renameInvalid))
+  check('illegal rename keeps the editor open', renameInvalid.stillOpen === true, JSON.stringify(renameInvalid))
+  check('illegal rename shows an error', renameInvalid.hasError === true, JSON.stringify(renameInvalid))
+
+  console.log('\n[12] save-as dialog')
+  await evaluate(cdp, sessionId, `(() => {
+    document.querySelector('.dfx-rename-input')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  })()`)
+  const saveOpen = await clickMenuRow(/save|另存为/u)
+  await new Promise((resolve) => setTimeout(resolve, 2000))
+  const saveResult = await evaluate(cdp, sessionId, `(() => {
     const dialog = document.querySelector('.dfx-dialog');
     const inputs = [...document.querySelectorAll('.dfx-dialog input.dfx-input')];
     return {
@@ -388,25 +466,30 @@ try {
       hasChoose: [...document.querySelectorAll('.dfx-dialog button')].some((b) => /choose|选择/i.test(b.textContent || '')),
     };
   })()`)
+  if (saveOpen.error !== undefined) console.log('   open failed:', JSON.stringify(saveOpen))
   console.log('   save-as dialog:', JSON.stringify(saveResult, null, 2))
   check('save-as dialog opened with a name field', saveResult.dialogPresent === true && saveResult.inputCount >= 1, JSON.stringify(saveResult))
 
-  console.log('\n[11] directory rows offer the directory menu')
+  console.log('\n[13] directory rows offer the directory menu')
+  await evaluate(cdp, sessionId, `(() => {
+    document.querySelector('.dfx-rename-input')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    document.querySelector('.dfx-dialog button')?.click();
+  })()`)
   const dirResult = await evaluate(cdp, sessionId, `(async () => {
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-    await new Promise((r) => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 400));
     const row = document.querySelector('[data-files-entry="directory"][data-files-path]');
     if (row === null) return { error: 'no directory row' };
     const rect = row.getBoundingClientRect();
     row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: rect.left + 20, clientY: rect.top + 5, button: 2 }));
-    await new Promise((r) => setTimeout(r, 400));
+    await new Promise((r) => setTimeout(r, 500));
+    // Use a stable directory: one the tree lists in the same order every time.
     const items = [...document.querySelectorAll('.dfx-menu-item')].map((i) => i.textContent.trim());
     return { items, count: items.length };
   })()`)
   console.log('   directory menu:', JSON.stringify(dirResult, null, 2))
   check('directory menu excludes file-only rows', dirResult.count !== undefined && dirResult.count < 8, JSON.stringify(dirResult))
 
-  console.log('\n[12] viewport containment: menu near the bottom edge flips up')
+  console.log('\n[14] viewport containment: menu near the bottom edge flips up')
   const flipResult = await evaluate(cdp, sessionId, `(async () => {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
     await new Promise((r) => setTimeout(r, 300));
@@ -427,7 +510,7 @@ try {
   console.log('   flip:', JSON.stringify(flipResult, null, 2))
   check('menu stays inside the viewport', flipResult.insideRight === true && flipResult.insideBottom === true, JSON.stringify(flipResult))
 
-  console.log('\n[13] console errors')
+  console.log('\n[15] console errors')
   const errors = consoleErrors.filter((line) => /dsh-file-extension/i.test(line))
   check('no plugin console errors', errors.length === 0, errors.join(' | '))
 } catch (error) {

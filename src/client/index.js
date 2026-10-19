@@ -14,7 +14,7 @@
  * @module dsh-file-extension/client
  */
 
-import { createElement } from 'react'
+import { createElement, useEffect } from 'react'
 import { createController } from './actions.js'
 import { NS, en, zh } from './locales.js'
 import { Overlay } from './overlay.jsx'
@@ -37,18 +37,26 @@ const composers = new Map()
  *
  * It renders nothing; it exists only to receive the session-scoped standard
  * props, which is where `inputActions` lives. One instance mounts per visible
- * Session and removes its facade when it unmounts.
+ * Session and publishes its facade while mounted.
+ *
+ * The facade is registered on mount and removed on unmount rather than assigned
+ * during render: React may render a component without committing it (StrictMode
+ * double render, a suspended boundary), and a render-time write would leave a
+ * facade behind for a Session that never actually mounted.
  *
  * @param {object} props - session-scoped slot props.
  * @returns {null} nothing.
  */
-function ComposerProbe(props) {
-  const { sessionId, inputActions } = props
-  // Assigning during render is safe here: the facade is a stable service
-  // object, and the map is read only from event handlers, never during render.
-  composers.set(String(sessionId), inputActions)
-  // React has no per-render cleanup for a side channel, so the dock registers
-  // an effect through the slot's own lifetime via the returned cleanup below.
+function ComposerProbe({ sessionId, inputActions }) {
+  const key = String(sessionId)
+  useEffect(() => {
+    composers.set(key, inputActions)
+    return () => {
+      // Only clear this Session's entry, and only while it is still ours: a
+      // remount can publish the next facade before this cleanup runs.
+      if (composers.get(key) === inputActions) composers.delete(key)
+    }
+  }, [key, inputActions])
   return null
 }
 
@@ -202,12 +210,34 @@ export function apply(ctx) {
     setTimeout(() => URL.revokeObjectURL(url), 10_000)
   }
 
+  /**
+   * Whether the deployment can reveal a path in a file manager.
+   *
+   * The answer is a property of the serving host, read once per page from the
+   * Session Remote that owns the gesture. `null` until it is known, so the menu
+   * does not disable the row before the answer arrives.
+   *
+   * @returns {Promise<boolean>} whether reveal is available.
+   */
+  let revealAvailable
+  const canReveal = async () => {
+    if (revealAvailable !== undefined) return revealAvailable
+    try {
+      const result = await ctx.get('remote')?.session?.canOpenWorkspacePath?.()
+      revealAvailable = result?.ok === true && result.value === true
+    } catch {
+      revealAvailable = false
+    }
+    return revealAvailable
+  }
+
   const controller = createController({
     t,
     sessionId,
     workspaceRoot,
     composer,
     reveal,
+    canReveal,
     openResource,
     closePreview,
     pickDirectory,
