@@ -11,7 +11,26 @@ instead of destroying files.
 > **Status:** verified on dsh `0.2.1-rc.2` (Windows 11). See
 > [Compatibility](#compatibility).
 
-![Context menu](docs/screenshot-menu.png)
+## What the menu looks like
+
+```
+┌───────────────────────────────────┐
+│ 🔍  Reveal in File Manager        │
+│ @   Add to Conversation           │
+│ ↗   Open in New Tab               │
+│ ⬇   Save As…                      │
+│───────────────────────────────────│
+│ ⧉   Copy Absolute Path            │
+│ ⧉   Copy Relative Path            │
+│───────────────────────────────────│
+│ ✎   Rename                        │
+│ 🗑  Delete                        │
+└───────────────────────────────────┘
+```
+
+Drawn with the harness theme tokens, so it follows light and dark themes.
+Directory rows show the same menu minus **Add to Conversation**, **Open in New
+Tab**, and **Save As**.
 
 ---
 

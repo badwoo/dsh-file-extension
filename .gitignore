@@ -5,10 +5,16 @@ pnpm-lock.yaml
 npm-debug.log*
 yarn-error.log*
 
+# Declared in package.json `files`, so never shipped
+docs/
+tests/
+DESIGN.md
+PUBLISH.md
+RELEASE_NOTES.md
+
 # Test and development leftovers
 _test-web.log
-_recon/
-tests/_probe*.mjs
+_dfx-test-fixture/
 *.log
 
 # OS noise
