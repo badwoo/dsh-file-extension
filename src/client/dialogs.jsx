@@ -186,19 +186,53 @@ export function DeleteDialog({ entry, permanent, busy, onConfirm, onCancel, t })
  */
 export function SaveAsDialog({ entry, canWrite, busy, pickDirectory, onConfirm, onCancel, t }) {
   const [name, setName] = useState(entry.name)
-  const [directory, setDirectory] = useState(null)
+  const [directory, setDirectory] = useState(entry.suggestedDirectory ?? '')
   const [error, setError] = useState(null)
   const [picking, setPicking] = useState(false)
+  /** The directory picker's own deadline, so a dialog that never opens cannot
+   * leave the button spinning forever. */
+  const pickTimeout = useRef(null)
 
   const choose = useCallback(async () => {
     setPicking(true)
-    try {
-      const picked = await pickDirectory(entry.name)
-      if (picked !== null) setDirectory(picked)
-    } finally {
-      setPicking(false)
+    setError(null)
+    // Race the host dialog against a deadline. The native chooser is a real OS
+    // window; on a headless or focus-starved host it may never come back, and
+    // waiting forever looks exactly like "the button does nothing".
+    const outcome = await Promise.race([
+      Promise.resolve()
+        .then(() => pickDirectory(entry.name))
+        .then((value) => ({ kind: 'picked', value }))
+        .catch((thrown) => ({ kind: 'failed', message: String(thrown?.message ?? thrown) })),
+      new Promise((resolve) => {
+        pickTimeout.current = setTimeout(() => resolve({ kind: 'timeout' }), 30_000)
+      }),
+    ])
+    if (pickTimeout.current !== null) {
+      clearTimeout(pickTimeout.current)
+      pickTimeout.current = null
     }
-  }, [entry.name, pickDirectory])
+    setPicking(false)
+    if (outcome.kind === 'picked' && typeof outcome.value === 'string' && outcome.value !== '') {
+      setDirectory(outcome.value)
+      return
+    }
+    if (outcome.kind === 'timeout') {
+      setError(t('dialog.saveAs.pickerTimeout'))
+      return
+    }
+    if (outcome.kind === 'failed') {
+      setError(t('dialog.saveAs.pickerFailed', { message: outcome.message }))
+      return
+    }
+    // A null answer means the host has no picker (or the user cancelled).
+    setError(t('dialog.saveAs.pickerUnavailable'))
+  }, [entry.name, pickDirectory, t])
+
+  // Clear the deadline when the dialog closes so no timer outlives it.
+  useEffect(() => () => {
+    if (pickTimeout.current !== null) clearTimeout(pickTimeout.current)
+  }, [])
 
   const submit = useCallback(() => {
     const trimmed = name.trim()
@@ -206,8 +240,11 @@ export function SaveAsDialog({ entry, canWrite, busy, pickDirectory, onConfirm, 
       setError(t('error.empty'))
       return
     }
+    // An empty destination means "same folder as the source", which the Host
+    // resolves itself.
+    const target = directory.trim() === '' ? null : directory.trim()
     setError(null)
-    onConfirm(trimmed, directory)
+    onConfirm(trimmed, target)
   }, [directory, name, onConfirm, t])
 
   const oversized = typeof entry.bytes === 'number' && entry.bytes > 32 * 1024 * 1024
@@ -250,12 +287,19 @@ export function SaveAsDialog({ entry, canWrite, busy, pickDirectory, onConfirm, 
               key: 'row',
               className: 'dfx-dialog-row',
               children: [
+                // The destination is a real editable field, not a read-only
+                // mirror: typing a path always works, so the dialog remains
+                // usable even when the host's directory dialog does not appear.
                 jsx('input', {
                   key: 'input',
                   className: 'dfx-input',
-                  value: directory ?? '',
-                  readOnly: true,
-                  placeholder: t('dialog.saveAs.directory'),
+                  value: directory,
+                  disabled: busy,
+                  placeholder: t('dialog.saveAs.directoryPlaceholder'),
+                  onChange: (event) => {
+                    setDirectory(event.target.value)
+                    setError(null)
+                  },
                 }),
                 jsx('button', {
                   key: 'choose',
@@ -263,7 +307,7 @@ export function SaveAsDialog({ entry, canWrite, busy, pickDirectory, onConfirm, 
                   className: 'dfx-button',
                   disabled: busy || picking,
                   onClick: choose,
-                  children: t('dialog.saveAs.choose'),
+                  children: picking ? t('dialog.saveAs.choosing') : t('dialog.saveAs.choose'),
                 }),
               ],
             }),

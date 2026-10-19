@@ -55,6 +55,14 @@ export function IconAt() {
   })
 }
 
+/**
+ * The @ icon as a plain markup string, for buttons this plugin mounts with raw
+ * DOM APIs (the row hover button lives inside the official row, outside React).
+ *
+ * Kept beside the React component so the two cannot drift apart in appearance.
+ */
+export const ICON_AT_HTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="3"></circle><path d="M11 8v1.2a1.9 1.9 0 0 0 3.8 0V8a6.8 6.8 0 1 0-2.6 5.4"></path></svg>'
+
 /** A window with an arrow: open in a new tab. */
 export function IconNewTab() {
   return Icon({

@@ -6,7 +6,7 @@
  *  1. the locale dictionaries,
  *  2. the overlay into `shell.overlay` (menu, dialogs, toasts, hover button),
  *  3. a hidden probe into `conversation.input.dock` that captures the composer's
- *     `inputActions` for the on-screen Session.
+ *     `inputActions` and the Session's workspace root for the on-screen Session.
  *
  * The document listeners that locate file rows are attached through the
  * controller's own disposer.
@@ -20,24 +20,47 @@ import { NS, en, zh } from './locales.js'
 import { Overlay } from './overlay.jsx'
 import { CSS } from './styles.js'
 
-/** Services this half needs; the plugin stays parked without them. */
+/** Services this half needs; the plugin stays parked without them.
+ *
+ * `remote.session` is its own service: the generated Session Remote namespace is
+ * a nested Cordis service under `remote`, and reading it without declaring it
+ * fails with "cannot get property without inject". The same applies to
+ * `remote.directoryPicker`. */
 export const inject = [
   'slots',
   'locale',
   'remote',
+  'remote.session',
+  'remote.directoryPicker',
   'sessions',
   'sidebarRight',
 ]
 
-/** Composer facades by Session, captured by the dock probe. */
+/** Composer facades and workspace roots by Session, captured by the dock probe. */
 const composers = new Map()
+const workspaceRoots = new Map()
+
+/**
+ * A fallback for the frame's Session selector, so the probe always calls a hook
+ * at the same position. The framework supplies `useSessions` for this slot, but
+ * calling it conditionally would make the hook order depend on a prop; this
+ * keeps the call count constant instead.
+ *
+ * @returns {undefined} no Session snapshot is available.
+ */
+const useNoSessions = () => undefined
 
 /**
  * The hidden composer probe.
  *
  * It renders nothing; it exists only to receive the session-scoped standard
- * props, which is where `inputActions` lives. One instance mounts per visible
- * Session and publishes its facade while mounted.
+ * props, which is where `inputActions` and `useSessions` live. One instance
+ * mounts per visible Session and publishes its facade while mounted.
+ *
+ * `useSessions` is a hook, so it is called during render — that is exactly what
+ * a slot component is for — and the result is published to the side map through
+ * an effect. Calling it inside an effect is invalid (React #321), which is what
+ * made the workspace root (and with it "copy relative path") silently fail.
  *
  * The facade is registered on mount and removed on unmount rather than assigned
  * during render: React may render a component without committing it (StrictMode
@@ -47,8 +70,14 @@ const composers = new Map()
  * @param {object} props - session-scoped slot props.
  * @returns {null} nothing.
  */
-function ComposerProbe({ sessionId, inputActions }) {
+function ComposerProbe({ sessionId, inputActions, useSessions }) {
   const key = String(sessionId)
+
+  // Subscribe to the smallest slice of the Session snapshot: its workspace root.
+  // The hook runs during render, unconditionally, so hook order stays constant.
+  const readSessions = typeof useSessions === 'function' ? useSessions : useNoSessions
+  const cwd = readSessions((sessions) => sessions.byId[key]?.cwd)
+
   useEffect(() => {
     composers.set(key, inputActions)
     return () => {
@@ -57,6 +86,12 @@ function ComposerProbe({ sessionId, inputActions }) {
       if (composers.get(key) === inputActions) composers.delete(key)
     }
   }, [key, inputActions])
+
+  useEffect(() => {
+    if (typeof cwd === 'string' && cwd !== '') workspaceRoots.set(key, cwd)
+    else workspaceRoots.delete(key)
+  }, [key, cwd])
+
   return null
 }
 
@@ -100,17 +135,15 @@ export function apply(ctx) {
   }
 
   /**
-   * The workspace root of the on-screen Session, used for relative paths and as
-   * the containment fence the Host also enforces.
+   * The workspace root of the on-screen Session, published by the composer
+   * probe from the same Session snapshot the official file tree reads.
    *
    * @returns {string | undefined} the absolute root.
    */
   const workspaceRoot = () => {
     const id = sessionId()
     if (id === undefined) return undefined
-    const sessions = ctx.get('sessions')
-    const snapshot = sessions?.byId
-    return snapshot?.[id]?.cwd
+    return workspaceRoots.get(id)
   }
 
   /**
@@ -132,7 +165,7 @@ export function apply(ctx) {
    * @returns {Promise<boolean>} whether the host accepted it.
    */
   const reveal = async (path) => {
-    const session = ctx.get('remote')?.session
+    const session = ctx.get('remote.session')
     if (session?.openWorkspacePath === undefined) return false
     const result = await session.openWorkspacePath({ path, action: 'reveal' })
     return result?.ok === true
@@ -178,9 +211,9 @@ export function apply(ctx) {
    */
   const pickDirectory = async () => {
     try {
-      const result = await ctx.get('remote')?.directoryPicker?.pick()
-      if (result === undefined) return null
-      // The generated Remote returns a result envelope.
+      const picker = ctx.get('remote.directoryPicker')
+      if (picker?.pick === undefined) return null
+      const result = await picker.pick()
       return result?.ok === true ? (result.value ?? null) : null
     } catch {
       return null
@@ -214,8 +247,7 @@ export function apply(ctx) {
    * Whether the deployment can reveal a path in a file manager.
    *
    * The answer is a property of the serving host, read once per page from the
-   * Session Remote that owns the gesture. `null` until it is known, so the menu
-   * does not disable the row before the answer arrives.
+   * Session Remote that owns the gesture.
    *
    * @returns {Promise<boolean>} whether reveal is available.
    */
@@ -223,7 +255,8 @@ export function apply(ctx) {
   const canReveal = async () => {
     if (revealAvailable !== undefined) return revealAvailable
     try {
-      const result = await ctx.get('remote')?.session?.canOpenWorkspacePath?.()
+      const session = ctx.get('remote.session')
+      const result = await session?.canOpenWorkspacePath?.()
       revealAvailable = result?.ok === true && result.value === true
     } catch {
       revealAvailable = false
@@ -262,7 +295,8 @@ export function apply(ctx) {
     locale: NS,
   }, () => createElement(Overlay, { controller })))
 
-  // The composer probe: one entry per Session, capturing `inputActions`.
+  // The composer probe: one entry per Session, capturing `inputActions` and the
+  // workspace root.
   slots.inject('conversation.input.dock', () => slots.register({
     name: 'conversation.input.dock',
     id: 'dsh-file-extension-composer',
@@ -273,6 +307,7 @@ export function apply(ctx) {
   ctx.effect(() => () => {
     controller.dispose()
     composers.clear()
+    workspaceRoots.clear()
   }, 'dsh-file-extension: teardown')
 }
 

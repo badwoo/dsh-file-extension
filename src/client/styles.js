@@ -297,22 +297,21 @@ export const CSS = `
   border: 0.5px solid var(--dsw-alias-border-l1);
   border-radius: var(--dfx-radius-sm);
   cursor: pointer;
-  opacity: 0;
-  transform: scale(0.9);
-  transition: opacity 90ms ease, transform 90ms ease;
-  pointer-events: none;
-  z-index: 2;
-}
-
-.dfx-row-at[data-visible='true'] {
   opacity: 1;
-  transform: scale(1);
   pointer-events: auto;
+  z-index: 2;
 }
 
 .dfx-row-at:hover {
   color: var(--dsw-alias-label-primary);
   background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* The official row button fills the row; keep the file name clear of the hover
+   button while it is shown so the two never overlap. */
+[data-dfx-hover='true'] > button .k-1LKG_name,
+[data-dfx-hover='true'] > button span {
+  padding-right: 26px;
 }
 
 .dfx-rename-input {

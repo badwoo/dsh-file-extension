@@ -323,7 +323,9 @@ export function createController(deps) {
     store.set({
       dialog: {
         kind: 'saveAs',
-        entry: { ...entry, bytes },
+        // The source's folder is the natural default destination, and it is the
+        // value the editable field starts from.
+        entry: { ...entry, bytes, suggestedDirectory: dirName(entry.path) },
         canWrite,
       },
     })

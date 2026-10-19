@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "File Extension",
+    "title": "File Operations Extension",
     "description": "Trae-style file actions in the right Sidebar: reveal, add to conversation, open in a tab, save a copy, copy paths, rename, and recycle-bin delete."
   }
 }

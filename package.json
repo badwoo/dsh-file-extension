@@ -1,7 +1,7 @@
 {
   "name": "dsh-file-extension",
-  "version": "0.1.0",
-  "description": "Trae-style file context menu for the dsh right Sidebar: reveal, add to chat, open in tab, save as, copy path, rename, and recycle-bin delete",
+  "version": "0.2.0",
+  "description": "文件操作功能扩展：为 DeepSeek Harness 右侧栏文件条目补全 Trae 风格操作（在文件管理器中显示、添加到对话、另存为、复制路径、重命名、回收站删除）",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
@@ -55,7 +55,7 @@
     "locale/*.json",
     "icon.svg",
     "README.md",
-    "README.zh.md",
+    "README.en.md",
     "LICENSE"
   ],
   "scripts": {

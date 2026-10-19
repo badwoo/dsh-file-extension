@@ -41,12 +41,16 @@ export function success(value = {}) {
  * Comparison is case-insensitive on Windows and macOS, which is what those
  * filesystems actually do, so a differently-cased path is not a false refusal.
  *
+ * An absent root is NOT treated as "no fence": the callers now refuse a request
+ * whose Session could not be resolved before reaching here, and allowing an
+ * undefined root would silently reopen that hole if a caller ever regressed.
+ *
  * @param {string} root - absolute workspace root.
  * @param {string} candidate - absolute candidate path.
  * @returns {boolean} true when the candidate is the root or inside it.
  */
 export function isInside(root, candidate) {
-  if (root === undefined || root === null || root === '') return true
+  if (root === undefined || root === null || root === '') return false
   const normalizedRoot = resolve(root)
   const normalizedCandidate = resolve(candidate)
   const caseInsensitive = process.platform === 'win32' || process.platform === 'darwin'

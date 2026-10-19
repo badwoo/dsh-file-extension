@@ -146,7 +146,7 @@ export function attachRowObservers(handlers) {
 
   const onMouseOut = (event) => {
     // Only clear when the pointer leaves the row entirely; moving between the
-    // row's own children must not flicker the button.
+    // row's own children — the hover button included — must not flicker it.
     const row = rowOf(event.target)
     if (row === null || hovered === null) return
     const next = event.relatedTarget
@@ -178,10 +178,28 @@ export function attachRowObservers(handlers) {
   // knowing its class name.
   document.addEventListener('scroll', onScroll, true)
 
-  // The tree re-renders as directories load and watches fire; overlays that
-  // track a row must follow it, and an inline editor whose row vanished must
-  // close rather than float over unrelated content.
-  const observer = new MutationObserver(() => {
+  // The tree re-renders as directories load and watches fire, so overlays that
+  // track a row must follow it. The observer must ignore the plugin's OWN DOM
+  // writes (the hover button and the inline editor): counting them would bump
+  // the revision, re-run the effect that mounts the button, mutate the DOM
+  // again, and spin forever — the flicker that made the button unclickable.
+  const isOwnMutation = (record) => {
+    if (record.target instanceof Element && record.target.closest('.dfx-root, .dfx-row-at, .dfx-rename-input') !== null) {
+      return true
+    }
+    for (const node of record.addedNodes) {
+      if (node instanceof Element && (node.classList.contains('dfx-row-at') || node.closest?.('.dfx-root') !== null)) return true
+    }
+    for (const node of record.removedNodes) {
+      if (node instanceof Element && node.classList.contains('dfx-row-at')) return true
+    }
+    // The `data-dfx-hover` marker and the row's inline `position` are the
+    // plugin's own decorations on a row the tree owns.
+    if (record.type === 'attributes' && record.attributeName === 'data-dfx-hover') return true
+    return false
+  }
+  const observer = new MutationObserver((records) => {
+    if (records.every(isOwnMutation)) return
     handlers.onTreeMutated()
   })
   observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-files-path'] })

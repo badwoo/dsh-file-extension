@@ -54,23 +54,55 @@ export const Config = {
 }
 
 /**
- * Resolve the workspace root of one Session, when it is live.
+ * Resolve the workspace root of one Session.
  *
- * The tree only lists inside this root, so using it as the containment fence
+ * The tree only lists inside this root, so it is also the containment fence that
  * keeps the plugin from becoming a general-purpose filesystem API for the page.
+ *
+ * A request naming no Session, or naming one this host has never seen, resolves
+ * to nothing. That is treated as a refusal by every caller rather than as "no
+ * fence": failing open here would let an unauthenticated-shaped request reach
+ * any path on the machine, which is exactly what the fence exists to prevent.
  *
  * @param {object} ctx - owning Cordis context.
  * @param {string | undefined} sessionId - Session named by the request.
- * @returns {string | undefined} the absolute workspace root.
+ * @returns {{ root: string | undefined, found: boolean }} the root, and whether
+ *   the Session was actually resolved.
  */
 function workspaceRootOf(ctx, sessionId) {
-  if (typeof sessionId !== 'string' || sessionId === '') return undefined
+  if (typeof sessionId !== 'string' || sessionId === '') {
+    return { root: undefined, found: false }
+  }
   try {
     const session = ctx.get('sessions')?.get(sessionId)
-    return session?.header?.cwd
+    const cwd = session?.header?.cwd
+    if (typeof cwd === 'string' && cwd !== '') return { root: cwd, found: true }
+    return { root: undefined, found: false }
   } catch {
-    return undefined
+    return { root: undefined, found: false }
   }
+}
+
+/**
+ * Read the Session identity and fence for one request, refusing an unresolvable
+ * Session with the plugin's own failure shape.
+ *
+ * @param {object} ctx - owning Cordis context.
+ * @param {object} body - the parsed request body.
+ * @returns {{ root: string } | { refusal: object }} the fence, or the refusal.
+ */
+function fenceFor(ctx, body) {
+  const { root, found } = workspaceRootOf(ctx, body?.sessionId)
+  if (!found) {
+    return {
+      refusal: {
+        code: FAILURE_CODES.outsideWorkspace,
+        message: 'the request names no Session this host can resolve',
+        details: { sessionResolved: false },
+      },
+    }
+  }
+  return { root }
 }
 
 /**
@@ -265,7 +297,12 @@ export function apply(ctx, config = {}) {
       sendJson(res, 400, { ok: false, code: FAILURE_CODES.operationFailed, message: 'the request body is not JSON', details: {} })
       return
     }
-    const outcome = await statPath(body.path, workspaceRootOf(ctx, body.sessionId))
+    const fence = fenceFor(ctx, body)
+    if (fence.refusal !== undefined) {
+      sendFailure(res, fence.refusal)
+      return
+    }
+    const outcome = await statPath(body.path, fence.root)
     if (outcome.ok) sendJson(res, 200, outcome)
     else sendFailure(res, outcome)
   })
@@ -277,7 +314,12 @@ export function apply(ctx, config = {}) {
       sendJson(res, 400, { ok: false, code: FAILURE_CODES.operationFailed, message: 'the request body is not JSON', details: {} })
       return
     }
-    const outcome = await renamePath(body.path, body.name, workspaceRootOf(ctx, body.sessionId))
+    const fence = fenceFor(ctx, body)
+    if (fence.refusal !== undefined) {
+      sendFailure(res, fence.refusal)
+      return
+    }
+    const outcome = await renamePath(body.path, body.name, fence.root)
     if (outcome.ok) sendJson(res, 200, outcome)
     else sendFailure(res, outcome)
   })
@@ -298,11 +340,12 @@ export function apply(ctx, config = {}) {
       })
       return
     }
-    const outcome = await removePath(
-      body.path,
-      { mode },
-      workspaceRootOf(ctx, body.sessionId),
-    )
+    const fence = fenceFor(ctx, body)
+    if (fence.refusal !== undefined) {
+      sendFailure(res, fence.refusal)
+      return
+    }
+    const outcome = await removePath(body.path, { mode }, fence.root)
     if (outcome.ok) sendJson(res, 200, outcome)
     else sendFailure(res, outcome)
   })
@@ -314,6 +357,11 @@ export function apply(ctx, config = {}) {
       sendJson(res, 400, { ok: false, code: FAILURE_CODES.operationFailed, message: 'the request body is not JSON', details: {} })
       return
     }
+    const fence = fenceFor(ctx, body)
+    if (fence.refusal !== undefined) {
+      sendFailure(res, fence.refusal)
+      return
+    }
     const outcome = await copyToPath(
       body.path,
       {
@@ -321,7 +369,7 @@ export function apply(ctx, config = {}) {
         name: body?.options?.name,
         overwrite: body?.options?.overwrite === true,
       },
-      workspaceRootOf(ctx, body.sessionId),
+      fence.root,
     )
     if (outcome.ok) sendJson(res, 200, outcome)
     else sendFailure(res, outcome)
@@ -334,10 +382,15 @@ export function apply(ctx, config = {}) {
       sendJson(res, 400, { ok: false, code: FAILURE_CODES.operationFailed, message: 'the request body is not JSON', details: {} })
       return
     }
+    const fence = fenceFor(ctx, body)
+    if (fence.refusal !== undefined) {
+      sendFailure(res, fence.refusal)
+      return
+    }
     const outcome = await readForDownload(
       body.path,
       { maxBytes: resolved.maxDownloadBytes },
-      workspaceRootOf(ctx, body.sessionId),
+      fence.root,
     )
     if (outcome.ok) sendJson(res, 200, outcome)
     else sendFailure(res, outcome)

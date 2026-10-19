@@ -16,7 +16,7 @@ import { jsx } from 'react/jsx-runtime'
 import { ContextMenu, menuItemsFor } from './menu.jsx'
 import { DeleteDialog, OverwriteDialog, SaveAsDialog } from './dialogs.jsx'
 import { findRow } from './controller.js'
-import { IconAt } from './icons.jsx'
+import { ICON_AT_HTML } from './icons.jsx'
 
 /**
  * Track one row's on-screen box, following scroll and layout changes.
@@ -70,43 +70,72 @@ function useRowBox(path, revision) {
 }
 
 /**
- * The hover `@` button, drawn over the hovered row.
+ * The hover `@` button.
  *
- * It is absolutely positioned rather than injected into the row so the file name
- * keeps its full width and its own ellipsis behaviour.
+ * The button is mounted *inside* the hovered row (the row is a positioned list
+ * item once the plugin marks it), not in a fixed overlay. Mounting it outside
+ * meant the button appeared under the pointer, the pointer then counted as
+ * having left the row, the button unmounted, and the cycle repeated — the
+ * flicker that made the button impossible to click. As a child of the row the
+ * pointer never leaves the row, so the hover is stable and clicks land.
  *
  * @param {object} props - component props.
  * @param {{ path: string } | null} props.entry - the hovered row.
  * @param {number} props.revision - tree mutation counter.
  * @param {(entry: object) => void} props.onClick - run "add to conversation".
  * @param {(key: string) => string} props.t - translate.
- * @returns {unknown} the button, or null.
+ * @returns {null} the button is portal-mounted by an effect; nothing renders.
  */
 function HoverAtButton({ entry, revision, onClick, t }) {
-  const box = useRowBox(entry === null ? null : entry.path, revision)
-  if (entry === null || box === null) return null
-  return jsx('button', {
-    type: 'button',
-    className: 'dfx-row-at',
-    'data-visible': 'true',
-    title: t('aria.atButton'),
-    'aria-label': t('aria.atButton'),
-    style: {
-      left: `${String(box.left + box.width - 28)}px`,
-      top: `${String(box.top + box.height / 2 - 11)}px`,
-    },
-    onPointerDown: (event) => {
+  const path = entry === null ? null : entry.path
+  // Keep the click handler in a ref so a new closure does not tear the button
+  // down and rebuild it; only a different hovered row does that.
+  const clickRef = useRef(onClick)
+  clickRef.current = onClick
+  const entryRef = useRef(entry)
+  entryRef.current = entry
+  void revision
+
+  useEffect(() => {
+    if (path === null) return undefined
+    const row = findRow(path)
+    if (row === null) return undefined
+
+    // The row is a `li`; making it the offset parent keeps the button anchored
+    // through scroll without measuring.
+    row.style.position = 'relative'
+    row.dataset.dfxHover = 'true'
+
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'dfx-row-at'
+    button.dataset.visible = 'true'
+    button.title = t('aria.atButton')
+    button.setAttribute('aria-label', t('aria.atButton'))
+    button.innerHTML = ICON_AT_HTML
+    button.addEventListener('pointerdown', (event) => {
       // The row's own click opens the file; this button must not also open it.
       event.preventDefault()
       event.stopPropagation()
-    },
-    onClick: (event) => {
+    })
+    button.addEventListener('click', (event) => {
       event.preventDefault()
       event.stopPropagation()
-      onClick(entry)
-    },
-    children: jsx(IconAt, {}),
-  })
+      const current = entryRef.current
+      clickRef.current(current === null ? { path } : current)
+    })
+    row.appendChild(button)
+    return () => {
+      button.remove()
+      delete row.dataset.dfxHover
+      row.style.removeProperty('position')
+    }
+    // Deliberately keyed only on the hovered path: the tree reuses the row
+    // element for the same path, so rebuilding on every mutation is pure churn
+    // and used to feed the observer loop that made the button flicker.
+  }, [path, t])
+
+  return null
 }
 
 /**
@@ -209,6 +238,11 @@ function InlineRename({ entry, revision, busy, onCommit, onCancel, error, t }) {
       onCancel()
     },
     onKeyDown: (event) => {
+      // A Chinese/Japanese IME uses Enter to confirm the composition; that
+      // keydown must not commit the rename, or the first Enter after typing
+      // CJK looks like "rename does nothing" (it commits the unedited IME
+      // string or cancels outright).
+      if (event.isComposing || event.keyCode === 229) return
       if (event.key === 'Enter') {
         event.preventDefault()
         // Read the live value from the element rather than React state: state
@@ -225,6 +259,7 @@ function InlineRename({ entry, revision, busy, onCommit, onCancel, error, t }) {
         return
       }
       if (event.key === 'Escape') {
+        if (event.isComposing || event.keyCode === 229) return
         event.preventDefault()
         event.stopPropagation()
         onCancel()

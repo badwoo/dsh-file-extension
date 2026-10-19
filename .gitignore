@@ -14,6 +14,8 @@ RELEASE_NOTES.md
 
 # Test and development leftovers
 _test-web.log
+_verify.log
+renamed-*.txt
 _dfx-test-fixture/
 *.log
 
