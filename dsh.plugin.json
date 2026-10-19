@@ -1,0 +1,7 @@
+# dsh-file-extension
+
+Trae-style file actions for the DeepSeek Harness right Sidebar: a themed
+right-click menu, a hover `@` button, and recycle-bin deletion.
+
+This file exists so `dsh plugin add github:badwoo/dsh-file-extension` installs
+from a repository whose purpose is discoverable at a glance.

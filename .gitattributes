@@ -1,0 +1,8 @@
+# Normalize to LF in the repository so Windows checkouts do not rewrite line
+# endings; the plugin's JavaScript and YAML are consumed on every platform.
+* text=auto eol=lf
+
+# Screenshots are binary.
+*.png binary
+*.jpg binary
+*.ico binary

@@ -1,0 +1,17 @@
+# Build and install artifacts
+node_modules/
+package-lock.json
+pnpm-lock.yaml
+npm-debug.log*
+yarn-error.log*
+
+# Test and development leftovers
+_test-web.log
+_recon/
+tests/_probe*.mjs
+*.log
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
