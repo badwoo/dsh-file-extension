@@ -170,11 +170,14 @@ save / trash" depends on the host, not on the browser.
 | Rename | ✅ Host filesystem | ✅ Host filesystem | ✅ Host filesystem |
 | Delete | ♻️ recycle bin | ♻️ recycle bin | ♻️ depends on the host OS |
 
-**Save As** uses the platform's native **directory** picker plus the plugin's own
-name field, not a native save dialog: dsh's desktop shell exposes only a
-directory-pick IPC channel and no save-dialog channel. The behaviour is
-equivalent — you can rename, change folder, and are asked before overwriting —
-but the dialog is drawn by the plugin.
+The **Save As** dialog is drawn by the plugin: both the file name and the
+**destination folder** are editable fields, and the **Choose…** button calls the
+host's own directory dialog (the native folder chooser on desktop). When that
+dialog does not answer — it opened behind the window, or the host is a plain Web
+deployment — the button immediately shows "Waiting for the host…" and explains
+itself after 30 seconds; typing a folder path always works, and an empty folder
+saves beside the original. Save As therefore stays usable even when the host
+dialog is not.
 
 ### Recycle bin by platform
 
