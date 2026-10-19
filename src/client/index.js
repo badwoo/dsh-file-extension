@@ -264,11 +264,58 @@ export function apply(ctx) {
     return revealAvailable
   }
 
+  /**
+   * Write an atomic `@` reference chip into the on-screen composer.
+   *
+   * Reaching the composer's reference writer needs a SESSION-SCOPED context, not
+   * the root one this `apply` runs in. Two public facts make that reachable:
+   *
+   *  - `ctx.get('sessions').scope(sessionId)` borrows the live Agent-scoped
+   *    Context of a retained Session — the same idto-context exchange the
+   *    harness's own `ui-commands` uses to reach a Session's composer;
+   *  - on that scoped context, `ctx.get('conversation').input.for(actx)` resolves
+   *    the per-Session input facade, whose `insertReference(ref, span)` replaces
+   *    the captured selection with one reference chip.
+   *
+   * This is deliberately NOT `inputActions.insertText`: that writes a plain text
+   * node, which the composer renders as literal characters and which leaves the
+   * caret inside a live `@` token — the thing that re-opens the official
+   * completion menu and made the user press Tab. A reference chip is highlighted
+   * by construction, carries the canonical mention into the sent prompt, and is
+   * owned by the official `@` source, so clicking it previews the file there.
+   *
+   * @param {object} entry - the file row entry.
+   * @param {{ source: string, ref: string, label: string, appearance: 'file' | 'folder' | 'session', clipboardText: string }} reference - the chip to write.
+   * @param {{ start: number, end: number, draftRev: number }} span - the captured insertion span.
+   * @returns {boolean} whether the chip was written.
+   */
+  const insertReference = (entry, reference, span) => {
+    const id = sessionId()
+    if (id === undefined || span === undefined) return false
+    try {
+      const sessions = ctx.get('sessions')
+      const actx = sessions?.scope?.(id)
+      // A Session that is not currently retained has no scope, and its composer
+      // has no editor to write into.
+      if (actx === undefined) return false
+      const conversation = actx.get('conversation')
+      const input = conversation?.input?.for?.(actx)
+      if (input?.insertReference === undefined) return false
+      return input.insertReference(reference, span) === true
+    } catch (error) {
+      // A refused edit is an ordinary outcome, not a plugin failure: the caller
+      // falls back to plain text. Logged so a genuine wiring break is visible.
+      console.warn('[dsh-file-extension] reference insert failed:', error)
+      return false
+    }
+  }
+
   const controller = createController({
     t,
     sessionId,
     workspaceRoot,
     composer,
+    insertReference,
     reveal,
     canReveal,
     openResource,

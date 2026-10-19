@@ -105,16 +105,34 @@ export function relativeTo(path, root) {
 }
 
 /**
- * Build an `@` mention token for a path.
+ * Build an `@` mention token for a path, exactly as the official file tree does.
  *
- * Follows the harness's own mention grammar: a bare `@path` when the path has
- * no spaces, and a quoted `@"path"` when it does.
+ * Mirrors the harness's own composer grammar (`formatFileMention` in the
+ * conversation package), because the token is not merely display text: it is the
+ * serialized form the reference chip carries into the model prompt, and a
+ * divergence would be visible in the sent message.
+ *
+ * Three details are easy to get wrong and are copied deliberately:
+ *
+ *  - a **directory** is referenced with a trailing slash (`@dir/`), which is how
+ *    the grammar distinguishes a folder from a file;
+ *  - a directory with spaces takes an **opening quote only** (`@"dir with space/`)
+ *    because the trailing slash terminates it, while a file takes both;
+ *  - a path containing a quote or a control character has no valid spelling, so
+ *    it is refused instead of being escaped — escaping would produce a token the
+ *    parser reads differently from what was intended.
  *
  * @param {string} path - the path to reference, already workspace-relative.
- * @returns {string} the mention text.
+ * @param {'file' | 'directory' | 'other'} [kind] - the entry kind.
+ * @returns {string | null} the mention text, or null when the path cannot be spelled.
  */
-export function mentionFor(path) {
-  return /[\s"]/u.test(path) ? `@"${path.replace(/"/g, '\\"')}"` : `@${path}`
+export function mentionFor(path, kind = 'file') {
+  const directory = kind === 'directory'
+  const target = directory ? `${path}/` : path
+  if (/[\u0000-\u001f\u007f-\u009f"]/u.test(target)) return null
+  if (!/\s/u.test(target)) return `@${target}`
+  if (directory) return `@"${target}`
+  return `@"${target}"`
 }
 
 /**
@@ -125,6 +143,7 @@ export function mentionFor(path) {
  *
  * @param {object} handlers - callbacks the controller raises.
  * @param {(entry: object, event: MouseEvent) => void} handlers.onContextMenu - right click on a row.
+ * @param {(event: MouseEvent) => void} handlers.onBlankContextMenu - right click on the tree's empty area.
  * @param {(entry: object | null) => void} handlers.onHoverChange - the row under the pointer, or null.
  * @param {(entry: object) => void} handlers.onRowRemoved - a row that had an inline editor disappeared.
  * @param {() => void} handlers.onTreeMutated - the tree changed (used to reposition overlays).
@@ -157,7 +176,19 @@ export function attachRowObservers(handlers) {
 
   const onContextMenu = (event) => {
     const row = rowOf(event.target)
-    if (row === null) return
+    if (row === null) {
+      // The empty area under the rows is the project root, so it gets its own
+      // menu. It is handled here rather than by a second listener so the two can
+      // never both fire for one click.
+      if (isBlankTreeArea(event.target)) {
+        const root = treeRoot()
+        if (root === null) return
+        event.preventDefault()
+        event.stopPropagation()
+        handlers.onBlankContextMenu(event, root)
+      }
+      return
+    }
     const entry = entryOf(row)
     if (entry === null) return
     // The tree has no menu of its own, but suppressing the native menu is what
@@ -224,4 +255,53 @@ export function findRow(path) {
     if (candidate instanceof HTMLElement && candidate.dataset.filesPath === path) return candidate
   }
   return null
+}
+
+/**
+ * The scrollable body of the file tree, when it is mounted.
+ *
+ * The tree publishes no row-level extension point either, so the blank area of
+ * the panel is found through the same kind of semantic attribute: the body that
+ * owns the rows. Its `data-files-body` marker is stable, unlike the hashed class
+ * names beside it.
+ *
+ * @returns {HTMLElement | null} the body element, or null when the tree is shut.
+ */
+export function treeBody() {
+  const body = document.querySelector('[data-files-body]')
+  return body instanceof HTMLElement ? body : null
+}
+
+/**
+ * The workspace root the open file tree is showing.
+ *
+ * Read from the tree container rather than from a row, because there IS no row
+ * for the root: it exists only as a header label. The container publishes the
+ * absolute root as `data-files-root`, which is the same fact the official tree
+ * itself renders, so nothing has to be re-derived from the Session.
+ *
+ * @returns {string | null} the absolute workspace root, or null.
+ */
+export function treeRoot() {
+  const container = document.querySelector('[data-files-state="tree"]')
+  const root = container?.getAttribute('data-files-root')
+  return typeof root === 'string' && root !== '' ? root : null
+}
+
+/**
+ * Whether a node lies in the tree's empty area rather than on a row.
+ *
+ * A right click that lands on `[data-files-body]` itself, on the root `<ul>`, or
+ * on any non-row descendant of those is a click on blank space — which is what
+ * "right-click in the project root" means. Rows and their contents are excluded,
+ * so this never competes with the row menu.
+ *
+ * @param {EventTarget | null} target - the event target.
+ * @returns {boolean} true when the click is on blank tree space.
+ */
+export function isBlankTreeArea(target) {
+  if (!(target instanceof Element)) return false
+  const body = treeBody()
+  if (body === null || !body.contains(target)) return false
+  return target.closest(ROW_SELECTOR) === null
 }

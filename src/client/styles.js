@@ -326,9 +326,41 @@ export const CSS = `
   border-radius: var(--dfx-radius-sm);
   outline: none;
   z-index: 3;
+  /* The overlay root is click-through (pointer-events: none) so the floating
+     layer never blocks the application; every element that must receive input
+     has to opt back in. Without this the inline editor could not be clicked,
+     the pointer landed on the page behind it, and the resulting blur made the
+     rename look like it silently did nothing. */
+  pointer-events: auto;
 }
 
 .dfx-hidden-probe {
   display: none;
+}
+
+/* Update dialog: the version rows read as a small definition list, with the two
+   values aligned so "installed" and "available" can be compared at a glance. */
+.dfx-dialog-wide {
+  max-width: 480px;
+}
+
+.dfx-update-versions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.dfx-update-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dfx-update-version {
+  font-family: var(--dsw-font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary);
 }
 `

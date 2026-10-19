@@ -11,9 +11,22 @@
 import { api, hostCapabilities, invalidateCapabilities } from './api.js'
 import { attachRowObservers, baseName, dirName, mentionFor, relativeTo } from './controller.js'
 import { createStore } from './store.js'
-
 /** How long one toast stays on screen, in milliseconds. */
 const TOAST_MS = 2600
+
+/**
+ * Owner of an `@` reference chip produced by this plugin.
+ *
+ * This is the official `@` source's registered name in `dsh-client-ui-reference`.
+ * Naming it here (rather than registering our own source) is deliberate: the
+ * official source already owns the click behaviour and the send-path codec, so a
+ * chip we insert previews the file through the official path and serializes
+ * exactly like one the user picked from the official menu. A source name that is
+ * NOT in the roster would not throw — it would silently leave the chip
+ * unclickable AND block the composer from ever sending, so the official name is
+ * the only safe value here.
+ */
+const OFFICIAL_REFERENCE_SOURCE = 'reference'
 
 /**
  * Create the controller.
@@ -25,6 +38,7 @@ const TOAST_MS = 2600
  * @param {() => Promise<string | null>} deps.pickDirectory - native directory picker.
  * @param {(address: string) => void} deps.openResource - open a resource in a new tab.
  * @param {() => string | undefined} deps.workspaceRoot - the on-screen workspace root.
+ * @param {(entry: object, reference: object, span: object) => boolean} deps.insertReference - write an atomic `@` reference chip into the on-screen composer.
  * @returns {object} the controller.
  */
 export function createController(deps) {
@@ -40,10 +54,16 @@ export function createController(deps) {
     renaming: null,
     /** A rename validation message shown under the inline editor. */
     renameError: null,
+    /** A creation validation message shown under the new-entry prompt. */
+    createError: null,
     /** Visible toasts. */
     toasts: [],
     /** True while a Host request is in flight. */
     busy: false,
+    /** The pending update check result, or null while none has been read. */
+    update: null,
+    /** True while the update check or apply is running. */
+    updateBusy: false,
     /** Bumped whenever the tree mutates, so overlays re-measure. */
     revision: 0,
     /** Host capabilities, once read. */
@@ -172,15 +192,31 @@ export function createController(deps) {
   }
 
   /**
-   * Insert an `@path` mention at the composer caret without disturbing the rest
-   * of the draft.
+   * Insert the file as an atomic `@` reference chip in the composer.
    *
-   * `captureInsertion()` returns a revision-guarded `TokenSpan` (`start`, `end`,
-   * `draftRev`); `insertText` refuses the write when the draft moved on, which is
-   * what keeps a concurrent edit from being clobbered.
+   * This is where the "add to conversation" behaviour actually lives, and it is
+   * deliberately NOT `insertText('@path', span)`.
+   *
+   * Why: the composer is a Lexical editor, and `insertText` inserts an ordinary
+   * TEXT node. The `@` highlight the user sees is a scan-derived decoration that
+   * only matches short lexicon names — a full path never matches it — so raw text
+   * would stay plain and unclickable. Worse, writing a literal `@` leaves the
+   * caret inside a live `@` token, which is what re-opens the official completion
+   * menu: that menu (and the Tab press needed to accept its first row) is exactly
+   * the behaviour the user reported as wrong.
+   *
+   * `insertReference` instead writes a real chip NODE, which is highlighted by
+   * construction, carries the canonical serialized mention into the prompt, and is
+   * routable to an owner that opens the file. The official `@` source is named
+   * `reference`, so the chip's owner is the official one: clicking it runs the
+   * official preview behaviour, no plugin code required. Because a node — not a
+   * token — is inserted, the completion menu never opens, so there is nothing to
+   * confirm with Tab. A chip has no "selected" intermediate state by design
+   * (`isKeyboardSelectable` is false upstream), and it is already the live
+   * highlighted end state the moment it lands.
    *
    * @param {object} entry - the row entry.
-   * @returns {boolean} whether the mention was inserted.
+   * @returns {boolean} whether the chip was inserted.
    */
   const addToChat = (entry) => {
     const composer = deps.composer()
@@ -189,20 +225,34 @@ export function createController(deps) {
       return false
     }
     const relative = relativeTo(entry.path, deps.workspaceRoot())
-    const mention = mentionFor(relative)
-    const span = composer.captureInsertion()
-    // Keep the token separate from preceding text: `@` only starts a mention at
-    // the beginning of the draft or after whitespace, so a caret sitting right
-    // after a word would otherwise produce an ordinary `word@path`.
-    const draft = composer.state?.getSnapshot?.()?.draft
-    const before = typeof draft === 'string' && span !== undefined && typeof span.start === 'number'
-      ? draft.slice(0, span.start)
-      : ''
-    const needsSpace = before.length > 0 && !/\s$/u.test(before)
-    const ok = composer.insertText(`${needsSpace ? ' ' : ''}${mention}`, span)
-    if (!ok) {
-      toast(t('toast.addedToChatFailed'), 'error')
+    const mention = mentionFor(relative, entry.kind)
+    if (mention === null) {
+      // The path has no valid mention spelling (a quote or a control character);
+      // inserting it would produce a token the parser reads differently.
+      toast(t('menu.addToChat.disabled'), 'error')
       return false
+    }
+
+    const span = composer.captureInsertion()
+    const inserted = deps.insertReference(entry, {
+      source: OFFICIAL_REFERENCE_SOURCE,
+      // A directory is referenced with its trailing slash, which is how the
+      // grammar tells folder from file, and is what makes a folder chip a folder.
+      ref: mention,
+      label: entry.kind === 'directory' ? `${baseName(entry.path)}/` : baseName(entry.path),
+      appearance: entry.kind === 'directory' ? 'folder' : 'file',
+      clipboardText: mention,
+    }, span)
+
+    if (!inserted) {
+      // Fall back to plain text ONLY as a last resort, so the user's intent is
+      // not lost when the reference route is refused (for example while a
+      // submission is in flight). The mention is then inserted as characters.
+      const text = composer.insertText(`${mention} `, composer.captureInsertion())
+      if (!text) {
+        toast(t('toast.mentionFailed'), 'error')
+        return false
+      }
     }
     toast(t('toast.addedToChat'), 'success')
     return true
@@ -277,6 +327,15 @@ export function createController(deps) {
         // input rather than a modal opening over it.
         startInlineRename(entry)
         return
+      case 'newFile':
+        openCreateDialog('file', entry)
+        return
+      case 'newFolder':
+        openCreateDialog('directory', entry)
+        return
+      case 'update':
+        await checkUpdate()
+        return
       case 'delete':
         await openDeleteDialog(entry)
         return
@@ -286,6 +345,104 @@ export function createController(deps) {
       default:
         return
     }
+  }
+
+  /**
+   * Open the "new file" / "new folder" prompt for a directory.
+   *
+   * The parent is the row's own directory for a folder row, and the workspace root
+   * for the root menu — they arrive on the entry's `path` either way, so the two
+   * surfaces share one code path.
+   *
+   * @param {'file' | 'directory'} kind - what to create.
+   * @param {object} entry - the containing entry (its path is the parent).
+   */
+  const openCreateDialog = (kind, entry) => {
+    store.set({
+      dialog: {
+        kind: 'create',
+        createKind: kind,
+        entry: { path: entry.path, name: entry.name, kind: entry.kind },
+      },
+      createError: null,
+    })
+  }
+
+  /**
+   * Create the entry the prompt names.
+   *
+   * @param {string} name - the new entry's name.
+   */
+  const confirmCreate = async (name) => {
+    const dialog = store.get().dialog
+    if (dialog === null || dialog.kind !== 'create') return
+    store.set({ busy: true, createError: null })
+    const result = await api.create(dialog.entry.path, name, dialog.createKind, deps.sessionId())
+    if (result.ok) {
+      store.set({ dialog: null, busy: false })
+      toast(t('toast.created', { name: result.value.name ?? name }), 'success')
+      deps.afterMutation()
+      return
+    }
+    // Keep the prompt open with the reason so the user can correct the name.
+    store.set({ busy: false, createError: describeFailure(result) })
+  }
+
+  /**
+   * Read the installed and the available version, and open the update dialog.
+   *
+   * The dialog opens immediately in a "checking" state and is filled when the
+   * Host answers: a click that appears to do nothing for a second is worse than
+   * one that visibly says it is asking.
+   */
+  const checkUpdate = async () => {
+    store.set({ dialog: { kind: 'update', stage: 'checking' }, updateBusy: true })
+    const result = await api.updateCheck()
+    store.set({ updateBusy: false })
+    if (!result.ok) {
+      store.set({ dialog: { kind: 'update', stage: 'error', message: describeFailure(result) } })
+      return
+    }
+    store.set({
+      update: result.value,
+      dialog: { kind: 'update', stage: 'ready', info: result.value },
+    })
+    if (result.value.error !== undefined) {
+      store.set({ dialog: { kind: 'update', stage: 'error', message: String(result.value.error) } })
+    }
+  }
+
+  /**
+   * Install the newest release of this plugin.
+   *
+   * The Host decides what "update" can mean in this deployment: where it can
+   * delegate to the plugin manager it does, and where it cannot it answers with
+   * the exact command to run. Both outcomes are reported verbatim, because
+   * claiming an update that did not happen would leave the user running old code.
+   */
+  const applyUpdate = async () => {
+    const dialog = store.get().dialog
+    if (dialog === null || dialog.kind !== 'update') return
+    store.set({ updateBusy: true, dialog: { kind: 'update', stage: 'applying', info: dialog.info } })
+    const result = await api.updateApply(deps.sessionId())
+    store.set({ updateBusy: false })
+    if (!result.ok) {
+      const message = describeFailure(result)
+      store.set({ dialog: { kind: 'update', stage: 'error', message }, updateBusy: false })
+      toast(t('toast.updateApplyFailed', { message }), 'error')
+      return
+    }
+    const value = result.value ?? {}
+    // `manualCommand` is present whenever the Host could not install the change
+    // itself — including every refusal — so it is the one honest marker of "the
+    // profile was not updated". Reporting success on a refusal is the exact
+    // failure this dialog exists to avoid.
+    if (value.applied !== true) {
+      store.set({ dialog: { kind: 'update', stage: 'manual', info: value } })
+      return
+    }
+    store.set({ dialog: { kind: 'update', stage: 'done', info: value } })
+    toast(value.restartRequired === true ? t('toast.updateRestart') : t('toast.updateApplied'), 'success')
   }
 
   /**
@@ -488,7 +645,7 @@ export function createController(deps) {
   }
 
   /**
-   * Open the context menu for one row.
+   * Open the context menu for a row.
    *
    * @param {object} entry - the row entry.
    * @param {MouseEvent} event - the triggering event.
@@ -505,6 +662,27 @@ export function createController(deps) {
   }
 
   /**
+   * Open the context menu for the blank area of the project root.
+   *
+   * The root has no row, so the "entry" here is synthesized from the tree's own
+   * published root: `kind: 'root'` selects the reduced menu (creation only), and
+   * the path is what a created entry's parent will be.
+   *
+   * @param {MouseEvent} event - the triggering event.
+   * @param {string} root - the absolute workspace root.
+   */
+  const openBlankMenu = (event, root) => {
+    store.set({
+      menu: {
+        path: root,
+        name: baseName(root),
+        kind: 'root',
+        anchor: { x: event.clientX, y: event.clientY },
+      },
+    })
+  }
+
+  /**
    * Install the document listeners that find rows.
    *
    * @returns {() => void} the disposer.
@@ -513,6 +691,9 @@ export function createController(deps) {
     onContextMenu: (entry, event) => {
       void ensureCapabilities()
       openMenu(entry, event)
+    },
+    onBlankContextMenu: (event, root) => {
+      openBlankMenu(event, root)
     },
     onHoverChange: (entry) => {
       // A rename in progress owns its row; a hover button over it would fight
@@ -540,6 +721,7 @@ export function createController(deps) {
     runMenuAction,
     addToChat,
     openMenu,
+    openBlankMenu,
     canAddToChat,
     ensureCapabilities,
     closeDialog,
@@ -550,5 +732,8 @@ export function createController(deps) {
     pickDirectory,
     confirmSaveAs,
     confirmOverwrite,
+    confirmCreate,
+    checkUpdate,
+    applyUpdate,
   }
 }

@@ -14,8 +14,9 @@
  */
 
 import { MAX_DOWNLOAD_BYTES, FAILURE_CODES } from './contract.js'
-import { copyToPath, readForDownload, removePath, renamePath, statPath } from './fsops.js'
+import { copyToPath, createPath, readForDownload, removePath, renamePath, statPath } from './fsops.js'
 import { probeTrash } from './trash.js'
+import { applyUpdate, checkForUpdate, isLoopbackRequest } from './update.js'
 
 /** Route prefix. One plugin, one namespace, mirroring `/api/<plugin>/*`. */
 const ROUTE_PREFIX = '/api/dsh-file-extension/'
@@ -396,6 +397,74 @@ export function apply(ctx, config = {}) {
     else sendFailure(res, outcome)
   })
 
+  /** POST /create — create one new file or directory inside a directory. */
+  const createHandler = route('POST', async (req, res) => {
+    const body = await readJsonBody(req)
+    if (body === null) {
+      sendJson(res, 400, { ok: false, code: FAILURE_CODES.operationFailed, message: 'the request body is not JSON', details: {} })
+      return
+    }
+    const fence = fenceFor(ctx, body)
+    if (fence.refusal !== undefined) {
+      sendFailure(res, fence.refusal)
+      return
+    }
+    const outcome = await createPath(
+      body.directory,
+      { name: body.name, kind: body.kind === 'directory' ? 'directory' : 'file' },
+      fence.root,
+    )
+    if (outcome.ok) sendJson(res, 200, outcome)
+    else sendFailure(res, outcome)
+  })
+
+  /**
+   * GET /update-check — which version is installed, and which one GitHub offers.
+   *
+   * Reads GitHub only; it never touches the installed package, so it is safe to
+   * call from any authorized browser session.
+   */
+  const updateCheckHandler = route('GET', async (_req, res) => {
+    const outcome = await checkForUpdate()
+    if (outcome.ok) {
+      sendJson(res, 200, outcome)
+      return
+    }
+    // A check that could not reach GitHub is not an HTTP error: the caller wants
+    // the reason rendered, not a failed request. The plugin's own code is kept in
+    // `details` so the Client can still branch on it.
+    sendJson(res, 200, {
+      ok: true,
+      value: { current: outcome.details?.current, latest: null, hasUpdate: false, upToDate: null, error: outcome.message, code: outcome.code },
+    })
+  })
+
+  /**
+   * POST /update-apply — install the newest release of this plugin.
+   *
+   * This is the only route that changes what is installed, so it carries the
+   * deployment's own authorization AND a loopback fence: a remote browser must
+   * not be able to reinstall a plugin on the host machine.
+   */
+  const updateApplyHandler = route('POST', async (req, res) => {
+    if (!isLoopbackRequest(req)) {
+      sendFailure(res, {
+        code: FAILURE_CODES.unsupported,
+        message: 'updating the plugin is only allowed from the host machine itself',
+        details: { loopbackRequired: true },
+      })
+      return
+    }
+    const body = await readJsonBody(req)
+    if (body === null) {
+      sendJson(res, 400, { ok: false, code: FAILURE_CODES.operationFailed, message: 'the request body is not JSON', details: {} })
+      return
+    }
+    const outcome = await applyUpdate(ctx, { spec: body.spec })
+    if (outcome.ok) sendJson(res, 200, outcome)
+    else sendFailure(res, outcome)
+  })
+
   // Every registration is an effect: unloading the plugin removes the routes,
   // so nothing survives an uninstall or a hot reload.
   const routes = [
@@ -405,6 +474,9 @@ export function apply(ctx, config = {}) {
     ['remove', removeHandler],
     ['copy', copyHandler],
     ['download', downloadHandler],
+    ['create', createHandler],
+    ['update-check', updateCheckHandler],
+    ['update-apply', updateApplyHandler],
   ]
   for (const [name, handler] of routes) {
     ctx.effect(

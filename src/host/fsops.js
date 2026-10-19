@@ -8,7 +8,7 @@
  * @module dsh-file-extension/fsops
  */
 
-import { access, constants, copyFile, readFile, rename, stat } from 'node:fs/promises'
+import { access, constants, copyFile, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { FAILURE_CODES, validateFileName } from './contract.js'
 import { deletePermanently, moveToTrash } from './trash.js'
@@ -139,6 +139,91 @@ export async function renamePath(path, name, workspaceRoot) {
       path: current.value.path,
       name,
     })
+  }
+}
+
+/**
+ * Create one new file or directory inside a directory.
+ *
+ * Used by the tree's "New File" / "New Folder" actions, which are offered on a
+ * directory row and on the blank area of the project root. The parent is fenced
+ * like every other operation, and the name is validated as a single path segment
+ * — so a name can neither escape the directory nor the workspace.
+ *
+ * An existing target is refused rather than overwritten: the HTTP surface has no
+ * confirmation step for creation, and silently truncating a file the user meant
+ * to keep would be the one irreversible mistake available here.
+ *
+ * @param {string} directory - absolute path of the containing directory.
+ * @param {{ name?: string, kind?: 'file' | 'directory' }} options - what to create.
+ * @param {string} [workspaceRoot] - root the directory must stay inside.
+ * @returns {Promise<object>} the outcome with the created path.
+ */
+export async function createPath(directory, options = {}, workspaceRoot) {
+  const kind = options?.kind === 'directory' ? 'directory' : 'file'
+  const name = typeof options?.name === 'string' ? options.name.trim() : ''
+
+  const problem = validateFileName(name)
+  if (problem !== null) {
+    return failure(FAILURE_CODES.invalidName, `the name is not usable: ${problem}`, { reason: problem })
+  }
+  if (typeof directory !== 'string' || directory.trim() === '') {
+    return failure(FAILURE_CODES.notFound, 'a containing directory is required')
+  }
+
+  const parent = resolve(directory)
+  if (!isInside(workspaceRoot, parent)) {
+    return failure(FAILURE_CODES.outsideWorkspace, 'the directory is outside the session workspace')
+  }
+
+  try {
+    const info = await stat(parent)
+    if (!info.isDirectory()) {
+      return failure(FAILURE_CODES.notDirectory, 'the target is not a directory', { directory: parent })
+    }
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return failure(FAILURE_CODES.notFound, 'the directory no longer exists', { directory: parent })
+    }
+    return failure(FAILURE_CODES.operationFailed, describeFsError(error), { directory: parent })
+  }
+
+  // `validateFileName` rejects both separators, so `name` is one segment and the
+  // join cannot leave `parent`; the fence re-check is still cheap insurance.
+  const target = join(parent, name)
+  if (!isInside(workspaceRoot, target)) {
+    return failure(FAILURE_CODES.outsideWorkspace, 'the target is outside the session workspace')
+  }
+
+  try {
+    await access(target, constants.F_OK)
+    return failure(FAILURE_CODES.alreadyExists, 'an entry with that name already exists', {
+      name,
+      path: target,
+    })
+  } catch {
+    // Absent, which is what creation needs.
+  }
+
+  try {
+    if (kind === 'directory') {
+      // Non-recursive: the parent was just checked, and a partial tree is worse
+      // than a refusal.
+      await mkdir(target)
+    } else {
+      // `wx` refuses an existing target, so a file created between the check
+      // above and this write cannot be clobbered.
+      await writeFile(target, '', { flag: 'wx' })
+    }
+    return success({ path: target, name, parent, kind })
+  } catch (error) {
+    if (error?.code === 'EEXIST') {
+      return failure(FAILURE_CODES.alreadyExists, 'an entry with that name already exists', {
+        name,
+        path: target,
+      })
+    }
+    return failure(FAILURE_CODES.operationFailed, describeFsError(error), { path: target, name })
   }
 }
 

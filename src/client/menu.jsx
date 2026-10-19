@@ -14,11 +14,14 @@ import {
   IconAt,
   IconCopy,
   IconFolder,
+  IconNewFile,
+  IconNewFolder,
   IconNewTab,
   IconRename,
   IconReveal,
   IconSaveAs,
   IconTrash,
+  IconUpdate,
 } from './icons.jsx'
 
 /** Gap kept between the menu and the viewport edge, in pixels. */
@@ -128,6 +131,11 @@ export function ContextMenu({ anchor, items, onActivate, onClose, t }) {
       type: 'button',
       role: 'menuitem',
       className: 'dfx-menu-item',
+      // A stable hook for tests and for any future automation: menu labels are
+      // localized, so matching on text is not a reliable way to address a row.
+      // `data-dfx-update` is carried by the one row that starts an update check.
+      'data-dfx-action': item.id,
+      ...(item.id === 'update' ? { 'data-dfx-update': 'true' } : {}),
       'data-active': activeIndex === index ? 'true' : 'false',
       'data-danger': item.danger === true ? 'true' : undefined,
       'aria-disabled': disabled ? 'true' : undefined,
@@ -167,72 +175,121 @@ export function ContextMenu({ anchor, items, onActivate, onClose, t }) {
  * Kept outside the component so the same definition drives both the menu and
  * any future command surface.
  *
+ * A **directory** row gains the two creation verbs, and a **root** menu (the
+ * blank area of the project tree, which has no row of its own) is the directory
+ * menu with the row-only verbs dropped: there is no entry to reveal, rename,
+ * copy or delete, but "new file/folder here" is exactly what that area means.
+ * The update verb is appended to every menu, so it is reachable from anywhere in
+ * the tree rather than only from a file.
+ *
  * @param {object} options - the situation.
- * @param {'file' | 'directory' | 'other'} options.kind - the entry kind.
+ * @param {'file' | 'directory' | 'other' | 'root'} options.kind - the entry kind.
  * @param {boolean} options.canReveal - whether the host can open a file manager.
  * @param {boolean} options.canAddToChat - whether a composer is available.
+ * @param {boolean} [options.canUpdate] - whether an update check can run.
  * @returns {readonly object[]} the rows.
  */
-export function menuItemsFor({ kind, canReveal, canAddToChat }) {
+export function menuItemsFor({ kind, canReveal, canAddToChat, canUpdate = false }) {
+  const isRoot = kind === 'root'
   const isDirectory = kind === 'directory'
-  const items = [
-    {
+  const items = []
+
+  if (isRoot) {
+    items.push({
+      id: 'newFile',
+      icon: IconNewFile,
+      labelKey: 'menu.newFile',
+      action: 'newFile',
+    })
+    items.push({
+      id: 'newFolder',
+      icon: IconNewFolder,
+      labelKey: 'menu.newFolder',
+      action: 'newFolder',
+    })
+  } else {
+    items.push({
       id: 'reveal',
       icon: IconReveal,
       labelKey: 'menu.reveal',
       hintKey: 'menu.reveal.disabled',
       disabled: !canReveal,
       action: 'reveal',
-    },
-  ]
-  if (!isDirectory) {
+    })
+    if (isDirectory) {
+      // Creation comes first for a folder: it is what a right click on a folder
+      // is usually for, and the menu's own ordering should say so.
+      items.push({
+        id: 'newFile',
+        icon: IconNewFile,
+        labelKey: 'menu.newFile',
+        action: 'newFile',
+      })
+      items.push({
+        id: 'newFolder',
+        icon: IconNewFolder,
+        labelKey: 'menu.newFolder',
+        action: 'newFolder',
+      })
+    } else {
+      items.push({
+        id: 'addToChat',
+        icon: IconAt,
+        labelKey: 'menu.addToChat',
+        hintKey: 'menu.addToChat.disabled',
+        disabled: !canAddToChat,
+        action: 'addToChat',
+      })
+      items.push({
+        id: 'openInTab',
+        icon: IconNewTab,
+        labelKey: 'menu.openInTab',
+        action: 'openInTab',
+      })
+      items.push({
+        id: 'saveAs',
+        icon: IconSaveAs,
+        labelKey: 'menu.saveAs',
+        action: 'saveAs',
+      })
+    }
+    items.push({ kind: 'separator' })
     items.push({
-      id: 'addToChat',
-      icon: IconAt,
-      labelKey: 'menu.addToChat',
-      hintKey: 'menu.addToChat.disabled',
-      disabled: !canAddToChat,
-      action: 'addToChat',
+      id: 'copyAbsolutePath',
+      icon: IconCopy,
+      labelKey: 'menu.copyAbsolutePath',
+      action: 'copyAbsolutePath',
     })
     items.push({
-      id: 'openInTab',
-      icon: IconNewTab,
-      labelKey: 'menu.openInTab',
-      action: 'openInTab',
+      id: 'copyRelativePath',
+      icon: IconCopy,
+      labelKey: 'menu.copyRelativePath',
+      action: 'copyRelativePath',
+    })
+    items.push({ kind: 'separator' })
+    items.push({
+      id: 'rename',
+      icon: IconRename,
+      labelKey: 'menu.rename',
+      action: 'rename',
     })
     items.push({
-      id: 'saveAs',
-      icon: IconSaveAs,
-      labelKey: 'menu.saveAs',
-      action: 'saveAs',
+      id: 'delete',
+      icon: isDirectory ? IconFolder : IconTrash,
+      labelKey: isDirectory ? 'menu.deleteDirectory' : 'menu.delete',
+      action: 'delete',
+      danger: true,
     })
   }
-  items.push({ kind: 'separator' })
-  items.push({
-    id: 'copyAbsolutePath',
-    icon: IconCopy,
-    labelKey: 'menu.copyAbsolutePath',
-    action: 'copyAbsolutePath',
-  })
-  items.push({
-    id: 'copyRelativePath',
-    icon: IconCopy,
-    labelKey: 'menu.copyRelativePath',
-    action: 'copyRelativePath',
-  })
-  items.push({ kind: 'separator' })
-  items.push({
-    id: 'rename',
-    icon: IconRename,
-    labelKey: 'menu.rename',
-    action: 'rename',
-  })
-  items.push({
-    id: 'delete',
-    icon: isDirectory ? IconFolder : IconTrash,
-    labelKey: isDirectory ? 'menu.deleteDirectory' : 'menu.delete',
-    action: 'delete',
-    danger: true,
-  })
+
+  if (canUpdate) {
+    items.push({ kind: 'separator' })
+    items.push({
+      id: 'update',
+      icon: IconUpdate,
+      labelKey: 'menu.update',
+      action: 'update',
+    })
+  }
   return items
 }

@@ -126,6 +126,38 @@ export function IconFolder() {
   })
 }
 
+/** A sheet with a plus: create a new file. */
+export function IconNewFile() {
+  return Icon({
+    children: [
+      jsx('path', { key: 'a', d: 'M9.2 2.2H4.6a1.4 1.4 0 0 0-1.4 1.4v8.8a1.4 1.4 0 0 0 1.4 1.4h6.8a1.4 1.4 0 0 0 1.4-1.4V5.6z' }),
+      jsx('path', { key: 'b', d: 'M9.2 2.2v3.4h3.6' }),
+      jsx('path', { key: 'c', d: 'M8 8.6v3.2M6.4 10.2h3.2' }),
+    ],
+  })
+}
+
+/** A folder with a plus: create a new folder. */
+export function IconNewFolder() {
+  return Icon({
+    children: [
+      jsx('path', { key: 'a', d: 'M1.9 4.4a1 1 0 0 1 1-1h2.9l1.3 1.6h6a1 1 0 0 1 1 1v6.4a1 1 0 0 1-1 1H2.9a1 1 0 0 1-1-1z' }),
+      jsx('path', { key: 'b', d: 'M8 6.6v4M6 8.6h4' }),
+    ],
+  })
+}
+
+/** A download arrow into a circle: check for and install an update. */
+export function IconUpdate() {
+  return Icon({
+    children: [
+      jsx('path', { key: 'a', d: 'M8 1.8v7.4' }),
+      jsx('path', { key: 'b', d: 'm5.2 6.6 2.8 2.8 2.8-2.8' }),
+      jsx('path', { key: 'c', d: 'M3.2 11.6v1.2a1.4 1.4 0 0 0 1.4 1.4h6.8a1.4 1.4 0 0 0 1.4-1.4v-1.2' }),
+    ],
+  })
+}
+
 /** An arrow turning back: restore from recycle bin, used in the delete body. */
 export function IconRestore() {
   return Icon({

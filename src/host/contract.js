@@ -119,6 +119,9 @@ export const FAILURE_CODES = Object.freeze({
   unsupported: 'file-extension/unsupported',
   operationFailed: 'file-extension/operation-failed',
   cancelled: 'file-extension/cancelled',
+  updateUnavailable: 'file-extension/update-unavailable',
+  updateFailed: 'file-extension/update-failed',
+  restartRequired: 'file-extension/restart-required',
 })
 
 /**

@@ -76,10 +76,11 @@ function useDialogBehavior(ref, onCancel) {
  * @param {string} props.title - heading text.
  * @param {unknown} props.children - body content.
  * @param {unknown} props.actions - the button row.
+ * @param {string} [props.extraClass] - an additional dialog class.
  * @param {() => void} props.onCancel - backdrop dismissal.
  * @returns {unknown} the dialog.
  */
-function Dialog({ title, children, actions, onCancel }) {
+function Dialog({ title, children, actions, extraClass, onCancel }) {
   const ref = useRef(null)
   useDialogBehavior(ref, onCancel)
   return jsx('div', {
@@ -89,7 +90,7 @@ function Dialog({ title, children, actions, onCancel }) {
     },
     children: jsx('div', {
       ref,
-      className: 'dfx-dialog',
+      className: extraClass === undefined ? 'dfx-dialog' : `dfx-dialog ${extraClass}`,
       role: 'dialog',
       'aria-modal': 'true',
       'aria-label': title,
@@ -156,17 +157,215 @@ export function DeleteDialog({ entry, permanent, busy, onConfirm, onCancel, t })
 }
 
 /**
- * Rename one entry, validating locally so the common mistakes never reach the
- * Host. The Host still validates: this is convenience, not the guard.
+ * Create a new file or folder inside one directory.
+ *
+ * The name is validated locally only for immediate feedback — the Host is the
+ * real guard, and its refusals come back through `error` and keep the prompt
+ * open so the user can correct the name instead of losing it.
  *
  * @param {object} props - component props.
- * @param {{ name: string, path: string }} props.entry - the target.
+ * @param {'file' | 'directory'} props.kind - what to create.
+ * @param {{ name: string, path: string }} props.entry - the containing directory.
+ * @param {string | null} props.error - a Host refusal to show.
  * @param {boolean} props.busy - true while the request is in flight.
  * @param {(name: string) => void} props.onConfirm - accept.
  * @param {() => void} props.onCancel - dismiss.
  * @param {(key: string, vars?: object) => string} props.t - translate.
  * @returns {unknown} the dialog.
  */
+export function NewEntryDialog({ kind, entry, error, busy, onConfirm, onCancel, t }) {
+  const [name, setName] = useState(kind === 'file' ? 'untitled.txt' : 'new-folder')
+  const isFile = kind === 'file'
+  const submit = useCallback(() => {
+    const trimmed = name.trim()
+    if (trimmed === '') return
+    onConfirm(trimmed)
+  }, [name, onConfirm])
+  return jsx(Dialog, {
+    title: t(isFile ? 'dialog.newFile.title' : 'dialog.newFolder.title'),
+    onCancel,
+    children: [
+      jsx('p', {
+        key: 'body',
+        className: 'dfx-dialog-body',
+        children: t(isFile ? 'dialog.newFile.body' : 'dialog.newFolder.body', { name: entry.name }),
+      }),
+      jsx('div', {
+        key: 'field',
+        className: 'dfx-dialog-field',
+        children: [
+          jsx('label', { key: 'label', className: 'dfx-dialog-label', children: t('dialog.newEntry.label') }),
+          jsx('input', {
+            key: 'input',
+            className: 'dfx-input',
+            value: name,
+            disabled: busy,
+            'data-dfx-new-entry': isFile ? 'file' : 'folder',
+            'aria-label': t('dialog.newEntry.label'),
+            'data-invalid': error === null ? undefined : 'true',
+            onChange: (event) => setName(event.target.value),
+            onKeyDown: (event) => {
+              if (event.isComposing || event.keyCode === 229) return
+              if (event.key !== 'Enter') return
+              event.preventDefault()
+              submit()
+            },
+          }),
+        ],
+      }),
+      jsx('div', { key: 'hint', className: 'dfx-dialog-hint', children: error ?? '' }),
+    ],
+    actions: [
+      jsx('button', {
+        key: 'cancel',
+        type: 'button',
+        className: 'dfx-button',
+        disabled: busy,
+        onClick: onCancel,
+        children: t('dialog.cancel'),
+      }),
+      jsx('button', {
+        key: 'confirm',
+        type: 'button',
+        className: 'dfx-button',
+        'data-primary': 'true',
+        disabled: busy || name.trim() === '',
+        onClick: submit,
+        children: t('dialog.newEntry.confirm'),
+      }),
+    ],
+  })
+}
+
+/**
+ * Show, and optionally apply, a plugin update.
+ *
+ * Three honest states matter here: which version is installed, which one exists,
+ * and whether this deployment can install it at all. When it cannot, the dialog
+ * shows the exact command to run rather than an "updated" message that would be
+ * false while the old code is still loaded.
+ *
+ * @param {object} props - component props.
+ * @param {string} props.stage - 'checking' | 'ready' | 'applying' | 'manual' | 'done' | 'error'.
+ * @param {object | null} props.info - the Host's check/apply result.
+ * @param {string | null} props.message - an error sentence.
+ * @param {boolean} props.busy - true while a request is in flight.
+ * @param {() => void} props.onApply - install the newest release.
+ * @param {() => void} props.onRecheck - run the check again.
+ * @param {() => void} props.onCancel - dismiss.
+ * @param {(key: string, vars?: object) => string} props.t - translate.
+ * @returns {unknown} the dialog.
+ */
+export function UpdateDialog({ stage, info, message, busy, onApply, onRecheck, onCancel, t }) {
+  const current = info?.current ?? '—'
+  const latest = info?.latest ?? '—'
+  const body = []
+  body.push(jsx('div', {
+    key: 'versions',
+    className: 'dfx-update-versions',
+    'data-dfx-update-state': stage,
+    children: [
+      jsx('div', {
+        key: 'current',
+        className: 'dfx-update-row',
+        children: [
+          jsx('span', { key: 'k', className: 'dfx-dialog-label', children: t('dialog.update.current') }),
+          jsx('code', { key: 'v', className: 'dfx-update-version', 'data-dfx-update-current': 'true', children: current }),
+        ],
+      }),
+      jsx('div', {
+        key: 'latest',
+        className: 'dfx-update-row',
+        children: [
+          jsx('span', { key: 'k', className: 'dfx-dialog-label', children: t('dialog.update.latest') }),
+          jsx('code', { key: 'v', className: 'dfx-update-version', 'data-dfx-update-latest': 'true', children: latest }),
+        ],
+      }),
+    ],
+  }))
+  if (stage === 'checking') {
+    body.push(jsx('p', { key: 'state', className: 'dfx-dialog-body', children: t('dialog.update.checking') }))
+  } else if (stage === 'error') {
+    body.push(jsx('p', {
+      key: 'state',
+      className: 'dfx-dialog-body',
+      'data-danger': 'true',
+      children: t('dialog.update.failed', { message: message ?? '' }),
+    }))
+  } else if (stage === 'manual') {
+    body.push(jsx('p', {
+      key: 'state',
+      className: 'dfx-dialog-body',
+      // A refusal carries its own reason; showing that is more useful than the
+      // generic sentence, and it is what makes the outcome verifiable.
+      children: info?.output !== undefined && info.output !== null && info.output !== ''
+        ? String(info.output)
+        : t('dialog.update.manual'),
+    }))
+    body.push(jsx('code', {
+      key: 'command',
+      className: 'dfx-dialog-path',
+      'data-dfx-update-command': 'true',
+      children: info?.manualCommand ?? '',
+    }))
+    if (info?.manualCommandUsable === false) {
+      body.push(jsx('p', {
+        key: 'unusable',
+        className: 'dfx-dialog-body',
+        children: t('dialog.update.manualUnusable'),
+      }))
+    }
+  } else if (stage === 'done') {
+    body.push(jsx('p', {
+      key: 'state',
+      className: 'dfx-dialog-body',
+      children: info?.restartRequired === true ? t('dialog.update.restart') : t('dialog.update.available'),
+    }))
+  } else if (info?.hasUpdate === true) {
+    body.push(jsx('p', { key: 'state', className: 'dfx-dialog-body', children: t('dialog.update.available') }))
+  } else if (info?.upToDate === true || info?.hasUpdate === false) {
+    body.push(jsx('p', { key: 'state', className: 'dfx-dialog-body', children: t('dialog.update.upToDate') }))
+  }
+  const canApply = stage === 'ready' && info?.hasUpdate === true
+  return jsx(Dialog, {
+    title: t('dialog.update.title'),
+    extraClass: 'dfx-dialog-wide',
+    onCancel,
+    children: body,
+    actions: [
+      jsx('button', {
+        key: 'cancel',
+        type: 'button',
+        className: 'dfx-button',
+        disabled: busy,
+        onClick: onCancel,
+        children: t('dialog.cancel'),
+      }),
+      jsx('button', {
+        key: 'recheck',
+        type: 'button',
+        className: 'dfx-button',
+        disabled: busy || stage === 'checking' || stage === 'applying',
+        'data-dfx-update-recheck': 'true',
+        onClick: onRecheck,
+        children: t('dialog.update.recheck'),
+      }),
+      stage === 'ready' || stage === 'applying'
+        ? jsx('button', {
+          key: 'apply',
+          type: 'button',
+          className: 'dfx-button',
+          'data-primary': 'true',
+          'data-dfx-update-apply': 'true',
+          disabled: busy || !canApply,
+          onClick: onApply,
+          children: stage === 'applying' ? t('dialog.update.applying') : t('dialog.update.apply'),
+        })
+        : null,
+    ],
+  })
+}
+
 /**
  * Save a copy: name plus destination folder.
  *

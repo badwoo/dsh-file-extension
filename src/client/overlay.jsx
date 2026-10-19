@@ -14,7 +14,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { jsx } from 'react/jsx-runtime'
 import { ContextMenu, menuItemsFor } from './menu.jsx'
-import { DeleteDialog, OverwriteDialog, SaveAsDialog } from './dialogs.jsx'
+import { DeleteDialog, NewEntryDialog, OverwriteDialog, SaveAsDialog, UpdateDialog } from './dialogs.jsx'
 import { findRow } from './controller.js'
 import { ICON_AT_HTML } from './icons.jsx'
 
@@ -141,9 +141,11 @@ function HoverAtButton({ entry, revision, onClick, t }) {
 /**
  * The inline rename editor, drawn over the row being renamed.
  *
- * A real input, focused and with the stem selected, so Enter/Escape behave as
- * the task requires. It commits through the Host, then closes; the tree
- * refreshes itself through its own directory watch.
+ * A real input, focused and with the stem selected. It commits the typed name on
+ * Enter **and on a click anywhere else** — the task's flow is "type the new name,
+ * click another area, and the rename must have taken effect" — and dismisses on
+ * Escape. It commits through the Host, then closes; the tree refreshes itself
+ * through its own directory watch.
  *
  * @param {object} props - component props.
  * @param {{ path: string, name: string, kind: string }} props.entry - the target.
@@ -165,6 +167,46 @@ function InlineRename({ entry, revision, busy, onCommit, onCancel, error, t }) {
    * null box as "gone" would cancel the editor before it ever rendered.
    */
   const [rowMissing, setRowMissing] = useState(false)
+
+  /**
+   * Whether this editor has already settled.
+   *
+   * Commit and dismissal are triggered by events that overlap — Enter blurs the
+   * input, so `onBlur` fires after the keydown, and a click that dismisses is
+   * also the blur that commits — so without a latch one rename would be sent
+   * twice, or a commit would race a cancel.
+   */
+  const settledRef = useRef(false)
+
+  /**
+   * Settle the editor by committing the typed name.
+   *
+   * The name is read from the input element rather than from React state: state
+   * lags behind a programmatic write, and committing the stale value would send
+   * the file's current name — indistinguishable from "rename does nothing".
+   * An unchanged or empty name simply closes the editor, so pressing Enter (or
+   * clicking away) after no edit is not an error.
+   */
+  const settle = () => {
+    if (settledRef.current) return
+    settledRef.current = true
+    const input = inputRef.current
+    const live = input instanceof HTMLInputElement ? input.value : value
+    const name = live.trim()
+    if (name === '' || name === entry.name) {
+      onCancel()
+      return
+    }
+    setValue(name)
+    onCommit(name)
+  }
+
+  /** Settle the editor by discarding the edit; a later blur must not commit. */
+  const dismiss = () => {
+    if (settledRef.current) return
+    settledRef.current = true
+    onCancel()
+  }
 
   useEffect(() => {
     setValue(entry.name)
@@ -197,8 +239,8 @@ function InlineRename({ entry, revision, busy, onCommit, onCancel, error, t }) {
   }, [box, entry.path])
 
   useEffect(() => {
-    if (rowMissing) onCancel()
-  }, [onCancel, rowMissing])
+    if (rowMissing) dismiss()
+  }, [rowMissing])
 
   // The box is filled by a layout effect, so the first render has none. Waiting
   // one frame to render the input at a measured position is safer than reading
@@ -220,22 +262,19 @@ function InlineRename({ entry, revision, busy, onCommit, onCancel, error, t }) {
       height: `${String(Math.max(20, box.height - 2))}px`,
     },
     onChange: (event) => setValue(event.target.value),
-    onBlur: (event) => {
-      // A click elsewhere is a cancel, matching the tree's own click behaviour.
+    onBlur: () => {
+      // Clicking anywhere else COMMITS the typed name. This is the behaviour the
+      // task asks for ("输入新名字后点击其他区域，改名应完成并生效") and it is the
+      // opposite of what this handler used to do: a blur called `onCancel`, so
+      // typing a name and then clicking away silently discarded it, which is
+      // exactly the "rename still does nothing" report.
       //
-      // Two cases must NOT cancel: a blur that arrives while the commit is in
-      // flight (focus moved for a reason the user did not choose), and a blur
-      // whose focus target is still inside the plugin's own overlay — the tree
-      // and the composer both take focus for their own reasons.
-      if (busy) return
-      const next = event.relatedTarget
-      if (next instanceof Node && document.querySelector('.dfx-root')?.contains(next)) return
-      // `document.activeElement` may still be the editor at blur time; if focus
-      // did not land outside the plugin's overlay, treat it as a dismissal only
-      // when the user actually moved somewhere unrelated.
-      const active = document.activeElement
-      if (active instanceof HTMLElement && document.querySelector('.dfx-root')?.contains(active)) return
-      onCancel()
+      // Two blurs must not settle the editor: one that arrives while the commit
+      // is already in flight (focus moved for a reason the user did not choose),
+      // and one caused by the row disappearing (the editor is unmounting, not
+      // being dismissed).
+      if (busy || rowMissing) return
+      settle()
     },
     onKeyDown: (event) => {
       // A Chinese/Japanese IME uses Enter to confirm the composition; that
@@ -245,24 +284,14 @@ function InlineRename({ entry, revision, busy, onCommit, onCancel, error, t }) {
       if (event.isComposing || event.keyCode === 229) return
       if (event.key === 'Enter') {
         event.preventDefault()
-        // Read the live value from the element rather than React state: state
-        // lags behind a programmatic write, and committing the stale value would
-        // send the file's current name and look like a silent no-op.
-        const input = event.currentTarget
-        const name = (input instanceof HTMLInputElement ? input.value : value).trim()
-        setValue(name)
-        if (name === '' || name === entry.name) {
-          onCancel()
-          return
-        }
-        onCommit(name)
+        settle()
         return
       }
       if (event.key === 'Escape') {
         if (event.isComposing || event.keyCode === 229) return
         event.preventDefault()
         event.stopPropagation()
-        onCancel()
+        dismiss()
       }
     },
     onPointerDown: (event) => event.stopPropagation(),
@@ -313,6 +342,9 @@ export function Overlay({ controller }) {
       kind: state.menu.kind,
       canReveal: state.canReveal !== false,
       canAddToChat: controller.canAddToChat(),
+      // The update verb is offered everywhere the menu is, so a user who cannot
+      // reach another surface can still check for a new release.
+      canUpdate: true,
     }).map((item) => (item.kind === 'separator'
       ? item
       : {
@@ -405,6 +437,29 @@ function renderDialog(state, controller, t) {
       name: dialog.name,
       busy: state.busy,
       onConfirm: () => controller.confirmOverwrite(),
+      onCancel: () => controller.closeDialog(),
+      t,
+    })
+  }
+  if (dialog.kind === 'create') {
+    return jsx(NewEntryDialog, {
+      kind: dialog.createKind,
+      entry: dialog.entry,
+      error: state.createError,
+      busy: state.busy,
+      onConfirm: (name) => controller.confirmCreate(name),
+      onCancel: () => controller.closeDialog(),
+      t,
+    })
+  }
+  if (dialog.kind === 'update') {
+    return jsx(UpdateDialog, {
+      stage: dialog.stage,
+      info: dialog.stage === 'ready' || dialog.stage === 'applying' ? dialog.info : (dialog.info ?? state.update),
+      message: dialog.message ?? null,
+      busy: state.updateBusy === true,
+      onApply: () => controller.applyUpdate(),
+      onRecheck: () => controller.checkUpdate(),
       onCancel: () => controller.closeDialog(),
       t,
     })

@@ -167,4 +167,10 @@ export const api = {
   copy: (path, options, sessionId) => post('copy', { path, options, sessionId }),
   /** Read a file for the browser-download fallback. */
   download: (path, sessionId) => post('download', { path, sessionId }),
+  /** Create one new file or folder inside a directory. */
+  create: (directory, name, kind, sessionId) => post('create', { directory, name, kind, sessionId }),
+  /** Read the installed and available plugin versions. */
+  updateCheck: () => get('update-check'),
+  /** Install the newest release of this plugin. */
+  updateApply: (sessionId, spec) => post('update-apply', { sessionId, spec }),
 }
