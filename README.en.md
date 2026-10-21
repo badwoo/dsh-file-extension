@@ -321,43 +321,6 @@ node tests/operations.mjs
 
 ---
 
-## Verification checklist
-
-After installing, restart `dsh web`, hard-refresh the browser, and walk this list.
-
-**Open the tree:** right Sidebar → guide → **Workspace files**.
-
-| # | Check | Expected |
-|---|---|---|
-| 1 | Right-click a file | The plugin's menu appears; no native menu |
-| 2 | Menu appearance | Follows the theme; switch light/dark and re-open |
-| 3 | `↑` / `↓` / `Home` / `End` | Highlight moves, skipping greyed rows |
-| 4 | `Esc`, click outside | Menu closes |
-| 5 | Right-click near the bottom-right corner | Menu flips to stay fully on screen |
-| 6 | Reveal in File Manager | Explorer opens with the file selected |
-| 7 | Add to Conversation | `@path` inserted at the caret; existing draft kept |
-| 8 | Type text after the mention, add another | Both mentions coexist |
-| 9 | Open in New Tab | File opens in a new right-panel tab |
-| 10 | Save As | Name defaults to `name-副本.ext`; pick a folder; file appears there |
-| 11 | Save As twice to the same name | Overwrite confirmation appears |
-| 12 | Compare source and copy | Source byte-identical; only the copy is new |
-| 13 | Copy Absolute / Relative Path | Toast appears; paste into the composer to confirm |
-| 14 | Rename → `Enter` | Row shows the new name; stem was pre-selected |
-| 15 | Rename → `Esc` | Name unchanged |
-| 16 | Rename to an existing name | Error toast; original file untouched |
-| 17 | Rename to `a<b>.txt` | "characters not allowed" error; nothing changed |
-| 18 | Hover a file row | `@` button fades in at the right edge with a tooltip |
-| 19 | Hover a long-named file | Name still ends in an ellipsis; row does not shift |
-| 20 | Click the `@` button | Same as Add to Conversation |
-| 21 | Delete a file | Dialog says it goes to the recycle bin |
-| 22 | Confirm, then **open the OS recycle bin** | **The file is there** |
-| 23 | Delete the file currently previewed | Its preview tab closes |
-| 24 | Right-click a folder | Reveal / copy / rename / Delete Folder only |
-| 25 | Delete a folder | Confirmation mentions the whole folder and the recycle bin |
-| 26 | Switch locale to English | All menu and dialog text is English |
-| 27 | Disable the plugin in Settings → Plugins | Menu, `@` button, and styles all disappear |
-| 28 | Re-enable it | Everything comes back without a page reload |
-
 **Residue check after uninstalling:**
 
 ```js
