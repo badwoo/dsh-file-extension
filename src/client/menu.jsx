@@ -13,10 +13,13 @@ import { jsx } from 'react/jsx-runtime'
 import {
   IconAt,
   IconCopy,
+  IconCopyFiles,
+  IconCopyTo,
   IconFolder,
   IconNewFile,
   IconNewFolder,
   IconNewTab,
+  IconPaste,
   IconRename,
   IconReveal,
   IconSaveAs,
@@ -182,16 +185,46 @@ export function ContextMenu({ anchor, items, onActivate, onClose, t }) {
  * The update verb is appended to every menu, so it is reachable from anywhere in
  * the tree rather than only from a file.
  *
+ * The three **transfer** verbs describe two different directions and are
+ * deliberately kept apart, because conflating them is how a file manager gets
+ * confusing:
+ *
+ *  - `copyTo`   writes the entry's bytes to a folder the user picks (either
+ *    row kind — a folder can be copied elsewhere too);
+ *  - `copyFiles` puts the entry's *path* on the operating system clipboard as a
+ *    file drop list, so the user can paste it in Explorer or Finder;
+ *  - `pasteFrom` reads that clipboard back and writes the files into a folder
+ *    (a folder row, or the root).
+ *
+ * Both clipboard verbs need a clipboard on the HOST, and `pasteFrom` also needs
+ * that clipboard to actually hold files. The clipboard answers arrive
+ * asynchronously and this function is synchronous, so they are passed in as
+ * ready-made booleans; **both default to false**, which means an unprobed menu
+ * or a first render before the probe settles shows the verbs disabled with a
+ * reason instead of offering an action that would only fail. The overlay
+ * re-renders when the probe lands, so the rows enable themselves at that point.
+ *
  * @param {object} options - the situation.
  * @param {'file' | 'directory' | 'other' | 'root'} options.kind - the entry kind.
  * @param {boolean} options.canReveal - whether the host can open a file manager.
  * @param {boolean} options.canAddToChat - whether a composer is available.
  * @param {boolean} [options.canUpdate] - whether an update check can run.
+ * @param {boolean} [options.clipboardHasFiles] - whether the OS clipboard holds files; false when unprobed.
+ * @param {boolean} [options.clipboardSupported] - whether the host has a usable OS clipboard; false when unprobed.
  * @returns {readonly object[]} the rows.
  */
-export function menuItemsFor({ kind, canReveal, canAddToChat, canUpdate = false }) {
+export function menuItemsFor({
+  kind,
+  canReveal,
+  canAddToChat,
+  canUpdate = false,
+  clipboardHasFiles = false,
+  clipboardSupported = false,
+}) {
   const isRoot = kind === 'root'
   const isDirectory = kind === 'directory'
+  /** A clipboard that exists but is empty / a clipboard that does not exist at all. */
+  const pasteHintKey = clipboardSupported ? 'menu.pasteFrom.disabled' : 'menu.clipboard.disabled'
   const items = []
 
   if (isRoot) {
@@ -206,6 +239,17 @@ export function menuItemsFor({ kind, canReveal, canAddToChat, canUpdate = false 
       icon: IconNewFolder,
       labelKey: 'menu.newFolder',
       action: 'newFolder',
+    })
+    items.push({ kind: 'separator' })
+    // The blank area is the workspace root, which is a real destination: pasting
+    // here is the ordinary "drop the clipboard into the project" gesture.
+    items.push({
+      id: 'pasteFrom',
+      icon: IconPaste,
+      labelKey: 'menu.pasteFrom',
+      hintKey: pasteHintKey,
+      disabled: !clipboardSupported || !clipboardHasFiles,
+      action: 'pasteFrom',
     })
   } else {
     items.push({
@@ -251,6 +295,33 @@ export function menuItemsFor({ kind, canReveal, canAddToChat, canUpdate = false 
         icon: IconSaveAs,
         labelKey: 'menu.saveAs',
         action: 'saveAs',
+      })
+    }
+    items.push({ kind: 'separator' })
+    // Moving an entry between folders: `copyTo` writes it somewhere the user
+    // picks, `copyFiles` hands it to the OS so they can paste it themselves.
+    items.push({
+      id: 'copyTo',
+      icon: IconCopyTo,
+      labelKey: 'menu.copyTo',
+      action: 'copyTo',
+    })
+    items.push({
+      id: 'copyFiles',
+      icon: IconCopyFiles,
+      labelKey: 'menu.copyFiles',
+      hintKey: 'menu.clipboard.disabled',
+      disabled: !clipboardSupported,
+      action: 'copyFiles',
+    })
+    if (isDirectory) {
+      items.push({
+        id: 'pasteFrom',
+        icon: IconPaste,
+        labelKey: 'menu.pasteFrom',
+        hintKey: pasteHintKey,
+        disabled: !clipboardSupported || !clipboardHasFiles,
+        action: 'pasteFrom',
       })
     }
     items.push({ kind: 'separator' })

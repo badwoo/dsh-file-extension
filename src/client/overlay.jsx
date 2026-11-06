@@ -14,7 +14,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { jsx } from 'react/jsx-runtime'
 import { ContextMenu, menuItemsFor } from './menu.jsx'
-import { DeleteDialog, NewEntryDialog, OverwriteDialog, SaveAsDialog, UpdateDialog } from './dialogs.jsx'
+import { DeleteDialog, NewEntryDialog, OverwriteDialog, SaveAsDialog, TransferDialog, UpdateDialog } from './dialogs.jsx'
 import { findRow } from './controller.js'
 import { ICON_AT_HTML } from './icons.jsx'
 
@@ -345,6 +345,12 @@ export function Overlay({ controller }) {
       // The update verb is offered everywhere the menu is, so a user who cannot
       // reach another surface can still check for a new release.
       canUpdate: true,
+      // Read straight from the shared snapshot, never probed here: the menu
+      // builder is synchronous, and these two flags are exactly why it can stay
+      // that way. An unprobed clipboard leaves both false, which renders the
+      // verbs disabled with a reason instead of offering a click that would fail.
+      clipboardSupported: state.clipboardSupported === true,
+      clipboardHasFiles: state.clipboardHasFiles === true,
     }).map((item) => (item.kind === 'separator'
       ? item
       : {
@@ -437,6 +443,25 @@ function renderDialog(state, controller, t) {
       name: dialog.name,
       busy: state.busy,
       onConfirm: () => controller.confirmOverwrite(),
+      onCancel: () => controller.closeDialog(),
+      t,
+    })
+  }
+  if (dialog.kind === 'transfer') {
+    return jsx(TransferDialog, {
+      // `key` on the direction so switching from a copy dialog straight to a
+      // paste dialog remounts instead of reusing the previous destination state.
+      key: `${String(dialog.direction)}-${(dialog.sources ?? []).map((source) => source.path).join('|')}`,
+      direction: dialog.direction,
+      sources: dialog.sources ?? [],
+      destination: typeof dialog.destination === 'string' ? dialog.destination : '',
+      canPick: dialog.canPick === true,
+      busy: state.busy,
+      error: state.transferError,
+      pickDirectory: (name) => controller.pickDirectory(name),
+      onConfirm: dialog.direction === 'copyTo'
+        ? (destination, collision) => controller.confirmCopyTo(destination, collision)
+        : (destination, collision) => controller.confirmPasteFrom(destination, collision),
       onCancel: () => controller.closeDialog(),
       t,
     })

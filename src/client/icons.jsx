@@ -95,6 +95,41 @@ export function IconCopy() {
   })
 }
 
+/** A folder with a moving arrow: copy out to another folder. */
+export function IconCopyTo() {
+  return Icon({
+    children: [
+      jsx('path', { key: 'a', d: 'M1.9 4.4a1 1 0 0 1 1-1h2.9l1.3 1.6h3.2' }),
+      jsx('path', { key: 'b', d: 'M1.9 4.4v6.4a1 1 0 0 0 1 1h4.4' }),
+      jsx('path', { key: 'c', d: 'M8.6 8.8h4.6' }),
+      jsx('path', { key: 'd', d: 'm11.2 6.8 2 2-2 2' }),
+      jsx('path', { key: 'e', d: 'M13.9 4.1h-2.2' }),
+    ],
+  })
+}
+
+/** Two overlapping sheets on a clipboard hook: put files on the OS clipboard. */
+export function IconCopyFiles() {
+  return Icon({
+    children: [
+      jsx('path', { key: 'a', d: 'M5.4 3.4h5.2v8.2H5.4z', rx: 1 }),
+      jsx('path', { key: 'b', d: 'M3.2 5.6v8.2a1 1 0 0 0 1 1h5.2' }),
+      jsx('path', { key: 'c', d: 'M6.9 2.4h2.2v1.2H6.9z' }),
+    ],
+  })
+}
+
+/** A clipboard window with a sheet dropping in: paste into this folder. */
+export function IconPaste() {
+  return Icon({
+    children: [
+      jsx('path', { key: 'a', d: 'M5.5 2.6h5a1 1 0 0 1 1 1v8.8a1 1 0 0 1-1 1h-5a1 1 0 0 1-1-1V3.6a1 1 0 0 1 1-1z' }),
+      jsx('path', { key: 'b', d: 'M6.6 1.6h2.8v1.8H6.6z' }),
+      jsx('path', { key: 'c', d: 'M6.3 8.4h3.4M8 6.7v3.2' }),
+    ],
+  })
+}
+
 /** A pencil: rename. */
 export function IconRename() {
   return Icon({

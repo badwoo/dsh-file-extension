@@ -363,4 +363,36 @@ export const CSS = `
   font-size: 12px;
   color: var(--dsw-alias-label-primary);
 }
+
+/* Transfer dialog: the collision choice is a small radio group, laid out the way
+   a file manager's paste dialog does — stacked, not a select, so all three
+   outcomes are visible without opening anything. */
+.dfx-transfer-collisions {
+  margin: 0 0 12px;
+  padding: 0;
+  border: 0;
+}
+
+.dfx-transfer-collisions > .dfx-dialog-label {
+  display: block;
+  margin-bottom: 6px;
+  padding: 0;
+}
+
+.dfx-transfer-radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  cursor: pointer;
+}
+
+.dfx-transfer-radio input {
+  margin: 0;
+  accent-color: var(--dsw-alias-brand-primary);
+}
+
+.dfx-transfer-radio input:disabled {
+  cursor: default;
+}
 `

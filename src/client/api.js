@@ -130,6 +130,7 @@ function transportFailure(error) {
  * @property {boolean} permanentDeleteFallback
  * @property {number} maxDownloadBytes
  * @property {string} saveAs
+ * @property {{ supported: boolean, strategy: string, reason?: string }} [clipboard]
  */
 
 /**
@@ -169,6 +170,24 @@ export const api = {
   download: (path, sessionId) => post('download', { path, sessionId }),
   /** Create one new file or folder inside a directory. */
   create: (directory, name, kind, sessionId) => post('create', { directory, name, kind, sessionId }),
+  /**
+   * Copy entries from the workspace out to a chosen folder.
+   *
+   * The one route that may write outside the workspace fence, which is why the
+   * Host still requires the SOURCE to be inside it; see `CROSS_FENCE_ROUTES`.
+   */
+  copyOut: (paths, options, sessionId) => post('copy-out', { paths, options, sessionId }),
+  /**
+   * Copy entries from the operating system clipboard into a workspace folder.
+   *
+   * The mirror of {@link api.copyOut}: the DESTINATION is fenced instead, so the
+   * page can never plant files outside its own workspace.
+   */
+  pasteIn: (directory, options, sessionId) => post('paste-in', { directory, options, sessionId }),
+  /** Read what the host's OS clipboard currently holds. */
+  clipboardRead: () => get('clipboard-read'),
+  /** Put paths on the host's OS clipboard as a file drop list. */
+  clipboardWrite: (paths) => post('clipboard-write', { paths }),
   /** Read the installed and available plugin versions. */
   updateCheck: () => get('update-check'),
   /** Install the newest release of this plugin. */

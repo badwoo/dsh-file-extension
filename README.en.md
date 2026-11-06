@@ -6,9 +6,10 @@ Trae-style file actions for the **right Sidebar file tree** of the
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web UI and
 desktop app: right-click any file for a themed context menu, hover any row for a
 one-click **@** button, and delete into the operating system's recycle bin
-instead of destroying files.
+instead of destroying files. Files and folders copy **both ways** between the
+tree and anywhere else on the computer.
 
-> **Status:** verified on dsh `0.2.1-rc.2` (Windows 11). See
+> **Status:** verified on dsh `0.2.2-rc.1` (Windows 11, Web and Desktop). See
 > [Compatibility](#compatibility).
 
 ## What the menu looks like
@@ -20,6 +21,9 @@ instead of destroying files.
 │ ↗   Open in New Tab               │
 │ ⬇   Save As…                      │
 │───────────────────────────────────│
+│ ⧉   Copy To…                      │
+│ ⧉   Copy Files                    │
+│───────────────────────────────────│
 │ ⧉   Copy Absolute Path            │
 │ ⧉   Copy Relative Path            │
 │───────────────────────────────────│
@@ -30,7 +34,7 @@ instead of destroying files.
 
 Drawn with the harness theme tokens, so it follows light and dark themes.
 Directory rows show the same menu minus **Add to Conversation**, **Open in New
-Tab**, and **Save As**.
+Tab**, and **Save As**, plus **New File**, **New Folder**, and **Paste Here**.
 
 ---
 
@@ -65,6 +69,9 @@ active light or dark theme.
 | **Save As…** | Writes a copy under a new name and folder. Defaults to `name-copy.ext` / `名称-副本.ext`. Never modifies the source. Asks before overwriting. |
 | **Copy Absolute Path** | Copies the full path, with a toast. |
 | **Copy Relative Path** | Copies the workspace-relative path, with a toast. |
+| **Copy To…** | Copies the file — or a **whole folder** — to anywhere on the computer. A native folder dialog picks the destination, then a copy is written. Name collisions keep **both** by default (`name (2).ext`); overwrite and skip are also offered. |
+| **Copy Files** | Puts the entry on the **operating system clipboard** as a real file drop list (`CF_HDROP`, not text), so it can be pasted straight into Explorer / Finder. |
+| **Paste Here** | Copies files or folders from the **operating system clipboard** into this directory. Greyed out when the clipboard holds no files. Keeps both on collision by default; never overwrites silently. |
 | **Rename** | Inline editor over the row, with the file stem selected. `Enter` commits, `Esc` cancels, clicking away cancels. |
 | **Delete** | **Moves the file to the operating system's recycle bin** and says so. Only falls back to permanent deletion — with a red warning — when the host has no reachable recycle bin. |
 
@@ -81,9 +88,43 @@ reflow. Clicking it is identical to the menu's **Add to Conversation**.
 
 ### Directory rows
 
-Directories get **Reveal**, **Copy Absolute Path**, **Copy Relative Path**,
+Directories get **Reveal**, **New File**, **New Folder**, **Copy To…**,
+**Copy Files**, **Paste Here**, **Copy Absolute Path**, **Copy Relative Path**,
 **Rename**, and **Delete Folder**. Deleting a folder says that the whole folder
 is moved to the recycle bin and asks for confirmation first.
+
+### Two-way copy with the rest of the computer
+
+The tree and anywhere else on the machine can move files in both directions:
+
+| Direction | Menu row | How it works |
+|---|---|---|
+| Tree → a chosen folder | **Copy To…** | Native folder dialog picks the target, then a recursive copy (whole folders included) |
+| Tree → system clipboard | **Copy Files** | Writes a **file drop list** to the OS clipboard, pasteable in Explorer / Finder |
+| System clipboard → tree | **Paste Here** | Reads the clipboard's file list and copies it recursively into this directory |
+
+Three rules are worth stating, because they are what stop this from becoming a
+read-write back door:
+
+1. **Copy To… sources stay inside the workspace.** The route can never be used to
+   read a file the page was not already allowed to read. The destination is
+   free-form — that is the feature.
+2. **Paste Here destinations stay inside the workspace.** The page cannot use it
+   to write outside the workspace. Sources come from what the user themselves put
+   on the clipboard.
+3. **Loopback only.** All four clipboard/transfer routes require the request to
+   come from the host machine itself (the same rule the in-place update already
+   used). The clipboard is a **machine-wide** resource, not a workspace one: a
+   remote browser session should be able to neither inspect it nor trigger a
+   copy. `clipboard-read` additionally **strips the plain-text flavour** and
+   returns only the file list, so the route cannot double as a way to read
+   arbitrary clipboard text.
+
+Collisions keep **both** by default (`name (2).ext`), matching a file manager,
+and never overwrite silently; overwrite and skip are explicit choices. Partial
+success is a normal outcome: skipped entries are reported one by one (vanished,
+locked, over the size cap, name skipped), and the UI says "copied N, skipped M"
+rather than claiming everything worked.
 
 ### Everything else
 
@@ -139,7 +180,8 @@ that `/api/dsh-file-extension/capabilities` returns `404`.
 
 | dsh version | Desktop (Electron) | Web | Notes |
 |---|---|---|---|
-| `0.2.1-rc.2` | ✅ verified | ✅ verified | Windows 11; 17 browser checks + 25 operation checks pass |
+| `0.2.2-rc.1` | ✅ verified | ✅ verified | Windows 11; this release's target, browser E2E fully green |
+| `0.2.1-rc.2` | ✅ verified | ✅ verified | the previous release's target |
 | other `0.2.x` | ⚠️ expected | ⚠️ expected | Depends on the `data-files-*` row attributes below |
 
 The plugin reads three attributes from the official UI. If a future dsh release
@@ -151,6 +193,17 @@ fix is a one-line change in `src/client/controller.js`:
 | `data-files-entry` | `dsh-client-ui-sidebar-files` | `file` / `directory` / `other` |
 | `data-files-path` | `dsh-client-ui-sidebar-files` | the row's absolute path |
 | `data-sidebar-right-session` | `dsh-client-ui-sidebar-right` | which Session the panel shows |
+
+The root blank area and the root path use two more attributes on the tree
+container, likewise stable: `data-files-state="tree"`, `data-files-root`, and
+`data-files-body`.
+
+> **What `0.2.2` changed:** it removed the tree's header row (and with it
+> `data-path-label`), and added an official `contextMenus` service. The plugin
+> never depended on the header — the root path comes from the container — so it
+> is unaffected. The new service is an optional alternative path; the plugin
+> still draws its own menu, because that keeps it free of a hard dependency on a
+> service that does not exist in `0.2.1`.
 
 ---
 

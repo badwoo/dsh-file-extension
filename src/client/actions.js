@@ -15,6 +15,17 @@ import { createStore } from './store.js'
 const TOAST_MS = 2600
 
 /**
+ * How long a clipboard answer stays usable, in milliseconds.
+ *
+ * The menu is synchronous and opens on right click, which can be followed by the
+ * same user opening it again one second later. Re-reading the OS clipboard on
+ * every open would spawn a helper process per click on Windows; never re-reading
+ * it would leave the paste row enabled long after the clipboard was emptied. A
+ * short window is the compromise, and every explicit action invalidates it.
+ */
+const CLIPBOARD_CACHE_MS = 2000
+
+/**
  * Owner of an `@` reference chip produced by this plugin.
  *
  * This is the official `@` source's registered name in `dsh-client-ui-reference`.
@@ -74,12 +85,33 @@ export function createController(deps) {
      * the answer arrives does not wrongly disable the row.
      */
     canReveal: null,
+    /**
+     * Whether the host has an operating system clipboard that can carry files.
+     *
+     * Starts `false`, not `null`: the menu builder is synchronous and has no way
+     * to wait for a probe, so the safe reading of "not known yet" is "no". A menu
+     * that opens before the answer arrives therefore shows the clipboard verbs
+     * disabled with a reason, and the overlay enables them once the probe lands a
+     * moment later. The alternative — optimistically enabled — would render an
+     * action that only fails when clicked.
+     */
+    clipboardSupported: false,
+    /** Whether that clipboard currently holds files, so "Paste Here" can run. */
+    clipboardHasFiles: false,
+    /** The host's own explanation when the clipboard is unusable, or null. */
+    clipboardReason: null,
+    /** A refusal shown inline in the transfer dialog. */
+    transferError: null,
   })
 
   let toastSeq = 0
   const timers = new Set()
   /** The one in-flight capabilities read, shared by concurrent callers. */
   let capabilitiesInFlight
+  /** The last clipboard answer, cached briefly; see CLIPBOARD_CACHE_MS. */
+  let clipboardCache = null
+  /** The one in-flight clipboard read, shared by concurrent callers. */
+  let clipboardInFlight
 
   /**
    * Show one transient message.
@@ -124,6 +156,12 @@ export function createController(deps) {
     if (code.endsWith('/outside-workspace')) return t('error.outsideWorkspace')
     if (code.endsWith('/too-large')) return t('error.tooLarge')
     if (code.endsWith('/unsupported')) return t('error.unsupported')
+    // The two clipboard refusals carry a real reason from the host; that is more
+    // useful than the generic sentence, but the code still selects the sentence
+    // so a host that returns no reason still reads correctly.
+    if (code.endsWith('/clipboard-empty')) return t('error.clipboardEmpty')
+    if (code.endsWith('/clipboard-unavailable')) return t('error.clipboardUnavailable')
+    if (code.endsWith('/self-nested')) return t('error.selfNested')
     if (/permission|denied/i.test(String(failure.message))) return t('error.permission')
     return t('error.operationFailed', { message: failure.message })
   }
@@ -161,6 +199,97 @@ export function createController(deps) {
 
   /** Whether a composer is available to receive a mention. */
   const canAddToChat = () => deps.composer() !== undefined
+
+  /**
+   * Drop the cached clipboard answer so the next probe re-reads the host.
+   *
+   * Called after every action that could have changed the clipboard, so a paste
+   * that just ran cannot leave a stale "clipboard holds files" behind.
+   */
+  const invalidateClipboard = () => {
+    clipboardCache = null
+  }
+
+  /**
+   * Probe the host clipboard and publish the answer into the store.
+   *
+   * Deliberately NOT awaited by the menu: `menuItemsFor` is a synchronous pure
+   * function and cannot wait, so it reads whatever the store already says and
+   * the overlay re-renders when this settles. Returned as a promise for the
+   * callers that genuinely do need the answer first (`pasteFrom`).
+   *
+   * A failed read is not an error to report: a host with no OS clipboard is a
+   * normal outcome (headless, or a browser session on another machine), and it
+   * is answered by disabling the rows with the host's own reason.
+   *
+   * @param {boolean} [force] - ignore the cached answer and re-read.
+   * @returns {Promise<{ supported: boolean, files: string[], text: string | null, reason: string | null }>} the answer.
+   */
+  const clipboardState = async (force = false) => {
+    const now = Date.now()
+    if (!force && clipboardCache !== null && now - clipboardCache.at < CLIPBOARD_CACHE_MS) {
+      return clipboardCache.value
+    }
+    if (clipboardInFlight !== undefined) return clipboardInFlight
+
+    clipboardInFlight = api.clipboardRead().then((result) => {
+      if (!result.ok) {
+        // The route itself failed. That is still "no usable clipboard" from the
+        // page's point of view, and treating it as anything else would enable a
+        // verb that cannot work.
+        const value = {
+          supported: false,
+          files: [],
+          text: null,
+          reason: describeFailure(result),
+        }
+        clipboardCache = { at: Date.now(), value }
+        return value
+      }
+      const payload = result.value ?? {}
+      const files = Array.isArray(payload.files)
+        ? payload.files.filter((entry) => typeof entry === 'string' && entry !== '')
+        : []
+      const value = {
+        supported: payload.supported === true,
+        files,
+        text: typeof payload.text === 'string' ? payload.text : null,
+        reason: typeof payload.reason === 'string' && payload.reason !== '' ? payload.reason : null,
+      }
+      clipboardCache = { at: Date.now(), value }
+      return value
+    }).finally(() => {
+      clipboardInFlight = undefined
+    })
+
+    const value = await clipboardInFlight
+    store.set({
+      clipboardSupported: value.supported,
+      clipboardHasFiles: value.supported && value.files.length > 0,
+      clipboardReason: value.reason,
+    })
+    return value
+  }
+
+  /**
+   * The synchronous clipboard answer the menu builder reads.
+   *
+   * Never awaits: it returns the last known snapshot and kicks off a refresh in
+   * the background when the cache has expired. The menu renders from the
+   * snapshot it has, which is why the store's initial value is the pessimistic
+   * one.
+   *
+   * @returns {{ supported: boolean, hasFiles: boolean, reason: string | null }} the snapshot.
+   */
+  const clipboardHasFiles = () => {
+    const state = store.get()
+    void clipboardState()
+    return {
+      supported: state.clipboardSupported === true,
+      hasFiles: state.clipboardSupported === true && state.clipboardHasFiles === true,
+      reason: state.clipboardReason,
+    }
+  }
 
   /**
    * Copy text to the clipboard, with a fallback for browsers that refuse the
@@ -292,6 +421,212 @@ export function createController(deps) {
   }
 
   /**
+   * Open the "copy to" dialog for one entry.
+   *
+   * The destination is chosen inside the dialog rather than before it opens: an
+   * empty native picker is a silent no-op when the user cancels, and a dialog
+   * that appears only after a picker closes gives the user nowhere to type a path
+   * when the picker itself fails. The dialog also asks for the collision mode,
+   * which has no sensible default to assume silently.
+   *
+   * @param {object} entry - the row entry (a file OR a directory).
+   */
+  const openCopyToDialog = async (entry) => {
+    await ensureCapabilities()
+    store.set({
+      dialog: {
+        kind: 'transfer',
+        direction: 'copyTo',
+        sources: [{ path: entry.path, name: entry.name, kind: entry.kind }],
+        destination: '',
+        // The same capability the save-as flow uses: without the native picker
+        // the user can still type a path, so this only controls the button.
+        canPick: store.get().capabilities?.saveAs === 'directory-picker',
+      },
+      transferError: null,
+    })
+  }
+
+  /**
+   * Write the "copy to" transfer.
+   *
+   * @param {string} destination - the destination folder.
+   * @param {'rename' | 'overwrite' | 'skip'} collision - how to resolve a clash.
+   */
+  const confirmCopyTo = async (destination, collision) => {
+    const dialog = store.get().dialog
+    if (dialog === null || dialog.kind !== 'transfer' || dialog.direction !== 'copyTo') return
+    const sources = dialog.sources ?? []
+    if (sources.length === 0) return
+    store.set({ busy: true, transferError: null })
+    const result = await api.copyOut(
+      sources.map((source) => source.path),
+      { destination, collision },
+      deps.sessionId(),
+    )
+    store.set({ busy: false })
+    if (!result.ok) {
+      const message = describeFailure(result)
+      // Keep the dialog open on a refusal: the destination is usually the thing
+      // to correct, and closing would make the user re-enter everything.
+      store.set({ transferError: message })
+      return
+    }
+    const value = result.value ?? {}
+    const copied = Array.isArray(value.copied) ? value.copied : []
+    const skipped = Array.isArray(value.skipped) ? value.skipped : []
+    store.set({ dialog: null, transferError: null })
+    if (copied.length === 0) {
+      // Nothing was written, so "copied 0 items" would be a false success.
+      const reason = skipped[0]?.reason
+      toast(
+        typeof reason === 'string'
+          ? t('toast.copyOutFailed', { message: reason })
+          : t('toast.transferNothing'),
+        'error',
+      )
+      return
+    }
+    toast(t('toast.copiedOut', {
+      count: String(copied.length),
+      path: typeof value.destination === 'string' ? value.destination : destination,
+    }), 'success')
+    if (skipped.length > 0) toast(t('toast.transferSkipped', { count: String(skipped.length) }), 'error')
+    deps.afterMutation()
+  }
+
+  /**
+   * Put one entry on the operating system clipboard as a file drop list.
+   *
+   * This is the outward half of the clipboard feature and is NOT the same verb as
+   * "copy to": nothing is copied anywhere. The path goes on the OS clipboard so
+   * the user can paste it themselves in Explorer or Finder, which is what makes
+   * the plugin usable for the "get this file out of the workspace" flow without
+   * a destination dialog.
+   *
+   * @param {object} entry - the row entry.
+   */
+  const copyFiles = async (entry) => {
+    // The non-forced read reuses the answer the menu open already fetched, so
+    // this does not spawn a second host process just to re-confirm support.
+    const state = await clipboardState()
+    if (!state.supported) {
+      toast(t('toast.clipboardUnavailable', {
+        message: state.reason ?? t('error.clipboardUnavailable'),
+      }), 'error')
+      return
+    }
+    const result = await api.clipboardWrite([entry.path])
+    // The clipboard just changed, so the cached answer is wrong either way.
+    invalidateClipboard()
+    if (!result.ok) {
+      toast(t('toast.copyOutFailed', { message: describeFailure(result) }), 'error')
+      return
+    }
+    const written = Number(result.value?.written ?? 0)
+    if (!Number.isFinite(written) || written < 1) {
+      // The Host answered ok but wrote nothing; claiming success would be a lie.
+      toast(t('toast.copyFailed'), 'error')
+      return
+    }
+    toast(t('toast.copiedToClipboard'), 'success')
+    // Re-probe: pasteFrom's row should become enabled now that files are there.
+    void clipboardState(true)
+  }
+
+  /**
+   * Read the clipboard and open the "paste here" dialog for one directory.
+   *
+   * The read happens first and outside the dialog, because an empty clipboard is
+   * not something the dialog can resolve — the user has to go and copy something.
+   * Reporting it as a toast is the honest outcome, and it is what keeps the
+   * confirmation dialog from ever listing zero entries.
+   *
+   * @param {object} entry - the directory row (or the root menu's synthesized entry).
+   */
+  const openPasteFromDialog = async (entry) => {
+    await ensureCapabilities()
+    const state = await clipboardState(true)
+    if (!state.supported) {
+      toast(t('toast.clipboardUnavailable', {
+        message: state.reason ?? t('error.clipboardUnavailable'),
+      }), 'error')
+      return
+    }
+    if (state.files.length === 0) {
+      toast(t('toast.clipboardEmpty'), 'error')
+      return
+    }
+    store.set({
+      dialog: {
+        kind: 'transfer',
+        direction: 'pasteFrom',
+        // The clipboard gives absolute paths and nothing else, so the name is
+        // derived locally purely for display.
+        sources: state.files.map((path) => ({ path, name: baseName(path), kind: 'file' })),
+        destination: entry.path,
+        canPick: store.get().capabilities?.saveAs === 'directory-picker',
+      },
+      transferError: null,
+    })
+  }
+
+  /**
+   * Write the "paste here" transfer.
+   *
+   * `sourcePaths` is passed explicitly rather than letting the Host re-read the
+   * clipboard: the user confirmed a specific list, and the clipboard could have
+   * changed between the dialog opening and the button being pressed. What they
+   * saw is what gets pasted.
+   *
+   * @param {string} directory - the destination folder.
+   * @param {'rename' | 'overwrite' | 'skip'} collision - how to resolve a clash.
+   */
+  const confirmPasteFrom = async (directory, collision) => {
+    const dialog = store.get().dialog
+    if (dialog === null || dialog.kind !== 'transfer' || dialog.direction !== 'pasteFrom') return
+    const sources = dialog.sources ?? []
+    if (sources.length === 0) return
+    store.set({ busy: true, transferError: null })
+    const result = await api.pasteIn(
+      directory,
+      { sourcePaths: sources.map((source) => source.path), collision },
+      deps.sessionId(),
+    )
+    store.set({ busy: false })
+    if (!result.ok) {
+      const code = String(result.code ?? '')
+      const message = code.endsWith('/self-nested') ? t('error.selfNested') : describeFailure(result)
+      store.set({ transferError: message })
+      return
+    }
+    const value = result.value ?? {}
+    const copied = Array.isArray(value.copied) ? value.copied : []
+    const skipped = Array.isArray(value.skipped) ? value.skipped : []
+    store.set({ dialog: null, transferError: null })
+    if (copied.length === 0) {
+      // Nothing was written. Reporting "pasted 0 items" as a success would be a
+      // lie, and the per-entry reason is the only honest thing to show.
+      const reason = skipped[0]?.reason
+      toast(
+        typeof reason === 'string'
+          ? t('toast.pasteFailed', { message: reason })
+          : t('toast.transferNothing'),
+        'error',
+      )
+      return
+    }
+    toast(t('toast.pastedIn', {
+      count: String(copied.length),
+      path: typeof value.directory === 'string' ? value.directory : directory,
+    }), 'success')
+    if (skipped.length > 0) toast(t('toast.transferSkipped', { count: String(skipped.length) }), 'error')
+    // The tree's own watches usually notice, but a bump re-measures the overlays
+    // that track a row and makes the new entries appear immediately.
+    deps.afterMutation()
+  }
+
+  /**
    * Run one context-menu action.
    *
    * @param {string} action - the action id.
@@ -322,6 +657,15 @@ export function createController(deps) {
         toast(ok ? t('toast.pathCopied') : t('toast.copyFailed'), ok ? 'success' : 'error')
         return
       }
+      case 'copyTo':
+        await openCopyToDialog(entry)
+        return
+      case 'copyFiles':
+        await copyFiles(entry)
+        return
+      case 'pasteFrom':
+        await openPasteFromDialog(entry)
+        return
       case 'rename':
         // The task calls for in-place editing, so the row itself becomes an
         // input rather than a modal opening over it.
@@ -490,7 +834,10 @@ export function createController(deps) {
 
   /** Close the active dialog. */
   const closeDialog = () => {
-    store.set({ dialog: null, busy: false })
+    // The inline transfer error belongs to the dialog that owned it, so it is
+    // cleared with it; a stale refusal reappearing on the next dialog would be
+    // blamed on the wrong action.
+    store.set({ dialog: null, busy: false, transferError: null })
   }
 
   /**
@@ -690,9 +1037,14 @@ export function createController(deps) {
   const attach = () => attachRowObservers({
     onContextMenu: (entry, event) => {
       void ensureCapabilities()
+      // Kicked off, never awaited: the menu must open on this tick. The rows
+      // render disabled from the current snapshot and enable themselves when the
+      // answer lands and the store update re-renders the overlay.
+      void clipboardState()
       openMenu(entry, event)
     },
     onBlankContextMenu: (event, root) => {
+      void clipboardState()
       openBlankMenu(event, root)
     },
     onHoverChange: (entry) => {
@@ -735,5 +1087,10 @@ export function createController(deps) {
     confirmCreate,
     checkUpdate,
     applyUpdate,
+    clipboardState,
+    clipboardHasFiles,
+    invalidateClipboard,
+    confirmCopyTo,
+    confirmPasteFrom,
   }
 }

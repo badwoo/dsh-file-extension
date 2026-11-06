@@ -549,6 +549,274 @@ export function SaveAsDialog({ entry, canWrite, busy, pickDirectory, onConfirm, 
 }
 
 /**
+ * One confirmation for a cross-folder transfer, used in both directions.
+ *
+ * `copyTo` and `pasteFrom` differ only in where the source list comes from and
+ * which route runs, so they share one dialog rather than two near-identical
+ * ones. Everything the user needs before an irreversible-ish write is here: how
+ * many entries, where they come from, where they are going, and what happens on
+ * a name clash.
+ *
+ * Two details are deliberate:
+ *
+ *  - the collision choice defaults to **keep both** (`rename`), which is what a
+ *    file manager's paste does. Overwriting is never the default, because the
+ *    default must not be the destructive option;
+ *  - the destination stays an editable field even when the host has a native
+ *    folder picker, exactly like the save-as dialog, so the dialog still works
+ *    when the OS dialog fails to appear.
+ *
+ * @param {object} props - component props.
+ * @param {'copyTo' | 'pasteFrom'} props.direction - which transfer this is.
+ * @param {readonly { path: string, name: string, kind: string }[]} props.sources - the entries being transferred.
+ * @param {string} props.destination - the destination folder, initially empty for copyTo.
+ * @param {boolean} props.canPick - whether the host has a native folder picker.
+ * @param {boolean} props.busy - true while the request is in flight.
+ * @param {string | null} props.error - a Host refusal to show.
+ * @param {(destination: string, collision: string) => void} props.onConfirm - accept.
+ * @param {(suggestedName?: string) => Promise<string | null>} props.pickDirectory - native picker.
+ * @param {() => void} props.onCancel - dismiss.
+ * @param {(key: string, vars?: object) => string} props.t - translate.
+ * @returns {unknown} the dialog.
+ */
+export function TransferDialog({
+  direction,
+  sources,
+  destination: initialDestination,
+  canPick,
+  busy,
+  error,
+  onConfirm,
+  pickDirectory,
+  onCancel,
+  t,
+}) {
+  const isCopy = direction === 'copyTo'
+  const [destination, setDestination] = useState(initialDestination ?? '')
+  const [collision, setCollision] = useState('rename')
+  const [localError, setLocalError] = useState(null)
+  const [picking, setPicking] = useState(false)
+  /** The picker's own deadline, so a dialog that never appears cannot leave the
+   * button spinning forever. Same reasoning as the save-as dialog. */
+  const pickTimeout = useRef(null)
+
+  useEffect(() => () => {
+    if (pickTimeout.current !== null) clearTimeout(pickTimeout.current)
+  }, [])
+
+  const choose = useCallback(async () => {
+    setPicking(true)
+    setLocalError(null)
+    const outcome = await Promise.race([
+      Promise.resolve()
+        .then(() => pickDirectory())
+        .then((value) => ({ kind: 'picked', value }))
+        .catch((thrown) => ({ kind: 'failed', message: String(thrown?.message ?? thrown) })),
+      new Promise((resolve) => {
+        pickTimeout.current = setTimeout(() => resolve({ kind: 'timeout' }), 30_000)
+      }),
+    ])
+    if (pickTimeout.current !== null) {
+      clearTimeout(pickTimeout.current)
+      pickTimeout.current = null
+    }
+    setPicking(false)
+    if (outcome.kind === 'picked' && typeof outcome.value === 'string' && outcome.value !== '') {
+      setDestination(outcome.value)
+      return
+    }
+    if (outcome.kind === 'timeout') {
+      setLocalError(t('dialog.transfer.pickerTimeout'))
+      return
+    }
+    if (outcome.kind === 'failed') {
+      setLocalError(t('dialog.transfer.pickerFailed', { message: outcome.message }))
+      return
+    }
+    setLocalError(t('dialog.transfer.pickerUnavailable'))
+  }, [pickDirectory, t])
+
+  const submit = useCallback(() => {
+    const target = destination.trim()
+    // Both directions need a destination. A transfer to nowhere has no meaning,
+    // and letting the Host guess would be worse than asking the user to name it.
+    if (target === '') {
+      setLocalError(t('dialog.transfer.destinationRequired'))
+      return
+    }
+    setLocalError(null)
+    onConfirm(target, collision)
+  }, [collision, destination, onConfirm, t])
+
+  const count = sources.length
+  const only = count === 1 ? sources[0] : undefined
+  const bodyKey = isCopy
+    ? (only === undefined ? 'dialog.transfer.body.copyTo' : 'dialog.transfer.body.copyToOne')
+    : (only === undefined ? 'dialog.transfer.body.pasteFrom' : 'dialog.transfer.body.pasteFromOne')
+  const bodyVars = only === undefined ? { count: String(count) } : { name: only.name }
+  const shown = localError ?? error
+
+  /**
+   * One radio row of the collision group.
+   *
+   * @param {string} value - the collision mode this row selects.
+   * @param {string} labelKey - its copy.
+   * @returns {unknown} the row.
+   */
+  const collisionRow = (value, labelKey) => jsx('label', {
+    key: value,
+    className: 'dfx-transfer-radio',
+    'data-dfx-collision': value,
+    children: [
+      jsx('input', {
+        key: 'input',
+        type: 'radio',
+        name: 'dfx-transfer-collision',
+        value,
+        checked: collision === value,
+        disabled: busy,
+        onChange: () => setCollision(value),
+      }),
+      jsx('span', { key: 'label', children: t(labelKey) }),
+    ],
+  })
+
+  const sourceSummary = sources
+    .slice(0, 3)
+    .map((source) => source.path)
+    .join('\n')
+
+  return jsx(Dialog, {
+    title: t(isCopy ? 'dialog.transfer.title.copyTo' : 'dialog.transfer.title.pasteFrom'),
+    onCancel,
+    children: [
+      jsx('p', {
+        key: 'body',
+        className: 'dfx-dialog-body',
+        children: t(bodyKey, bodyVars),
+      }),
+      jsx('div', {
+        key: 'source',
+        className: 'dfx-dialog-field',
+        children: [
+          jsx('span', { key: 'label', className: 'dfx-dialog-label', children: t('dialog.transfer.source') }),
+          jsx('code', {
+            key: 'value',
+            className: 'dfx-dialog-path',
+            'data-dfx-transfer-source': 'true',
+            children: count > 3 ? `${sourceSummary}\n…` : sourceSummary,
+          }),
+        ],
+      }),
+      jsx('div', {
+        key: 'destination',
+        className: 'dfx-dialog-field',
+        children: [
+          jsx('label', {
+            key: 'label',
+            className: 'dfx-dialog-label',
+            children: t('dialog.transfer.destination'),
+          }),
+          canPick
+            ? jsx('div', {
+              key: 'row',
+              className: 'dfx-dialog-row',
+              children: [
+                // Editable even with a native picker: typing always works, so the
+                // dialog survives a host whose folder dialog never appears.
+                jsx('input', {
+                  key: 'input',
+                  className: 'dfx-input',
+                  value: destination,
+                  disabled: busy,
+                  placeholder: t('dialog.transfer.destinationPlaceholder'),
+                  'aria-label': t('dialog.transfer.destination'),
+                  'data-dfx-transfer-destination': 'true',
+                  onChange: (event) => {
+                    setDestination(event.target.value)
+                    setLocalError(null)
+                  },
+                  // Enter submits, so a typed path needs no mouse trip.
+                  onKeyDown: (event) => {
+                    if (event.key !== 'Enter') return
+                    event.preventDefault()
+                    submit()
+                  },
+                }),
+                jsx('button', {
+                  key: 'choose',
+                  type: 'button',
+                  className: 'dfx-button',
+                  disabled: busy || picking,
+                  'data-dfx-transfer-choose': 'true',
+                  onClick: choose,
+                  children: picking ? t('dialog.transfer.choosing') : t('dialog.transfer.choose'),
+                }),
+              ],
+            })
+            : jsx('input', {
+              key: 'input',
+              className: 'dfx-input',
+              value: destination,
+              disabled: busy,
+              placeholder: t('dialog.transfer.destinationPlaceholder'),
+              'aria-label': t('dialog.transfer.destination'),
+              'data-dfx-transfer-destination': 'true',
+              onChange: (event) => {
+                setDestination(event.target.value)
+                setLocalError(null)
+              },
+              onKeyDown: (event) => {
+                if (event.key !== 'Enter') return
+                event.preventDefault()
+                submit()
+              },
+            }),
+        ],
+      }),
+      jsx('fieldset', {
+        key: 'collision',
+        className: 'dfx-dialog-field dfx-transfer-collisions',
+        children: [
+          jsx('legend', { key: 'legend', className: 'dfx-dialog-label', children: t('dialog.transfer.collision') }),
+          collisionRow('rename', 'dialog.transfer.collisionRename'),
+          collisionRow('overwrite', 'dialog.transfer.collisionOverwrite'),
+          collisionRow('skip', 'dialog.transfer.collisionSkip'),
+        ],
+      }),
+      jsx('div', {
+        key: 'error',
+        className: 'dfx-dialog-hint',
+        'data-dfx-transfer-error': 'true',
+        children: shown ?? '',
+      }),
+    ],
+    actions: [
+      jsx('button', {
+        key: 'cancel',
+        type: 'button',
+        className: 'dfx-button',
+        disabled: busy,
+        onClick: onCancel,
+        children: t('dialog.cancel'),
+      }),
+      jsx('button', {
+        key: 'confirm',
+        type: 'button',
+        className: 'dfx-button',
+        'data-primary': 'true',
+        'data-dfx-transfer-confirm': 'true',
+        disabled: busy,
+        onClick: submit,
+        children: busy
+          ? t('dialog.transfer.working')
+          : t(isCopy ? 'dialog.transfer.confirmCopy' : 'dialog.transfer.confirmPaste'),
+      }),
+    ],
+  })
+}
+
+/**
  * A confirmation for replacing an existing file at the save-as destination.
  *
  * @param {object} props - component props.

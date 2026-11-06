@@ -7,14 +7,17 @@
  * as protected as an official one.
  *
  * This half owns everything that needs Node: recycle-bin deletion, rename,
- * save-as copies, and reading a file for the browser-download fallback. The
- * browser half owns only presentation.
+ * save-as copies, reading a file for the browser-download fallback, and the
+ * operating-system clipboard / cross-fence transfers. The browser half owns only
+ * presentation.
  *
  * @module dsh-file-extension
  */
 
 import { MAX_DOWNLOAD_BYTES, FAILURE_CODES } from './contract.js'
+import { probeClipboard, readClipboard, writeClipboard } from './clipboard.js'
 import { copyToPath, createPath, readForDownload, removePath, renamePath, statPath } from './fsops.js'
+import { copyOut, pasteIn } from './transfer.js'
 import { probeTrash } from './trash.js'
 import { applyUpdate, checkForUpdate, isLoopbackRequest } from './update.js'
 
@@ -124,19 +127,28 @@ function sendJson(res, status, body) {
 /**
  * Send one failed outcome as an HTTP error, keeping the plugin's stable code.
  *
+ * The status is a transport hint only: the Client branches on `code`. The new
+ * cross-fence codes are mapped onto the existing buckets (policy refusal -> 400,
+ * an empty clipboard -> 400, an unreachable clipboard -> 422 like `unsupported`)
+ * so no caller sees an unexpected 5xx for a situation it can describe.
+ *
  * @param {import('node:http').ServerResponse} res - the response.
  * @param {{ code: string, message: string, details?: object }} outcome - the failure.
  */
 function sendFailure(res, outcome) {
   const status = outcome.code === FAILURE_CODES.notFound
     ? 404
-    : outcome.code === FAILURE_CODES.invalidName || outcome.code === FAILURE_CODES.outsideWorkspace
+    : outcome.code === FAILURE_CODES.invalidName
+        || outcome.code === FAILURE_CODES.outsideWorkspace
+        || outcome.code === FAILURE_CODES.selfNested
+        || outcome.code === FAILURE_CODES.clipboardEmpty
       ? 400
       : outcome.code === FAILURE_CODES.alreadyExists
         ? 409
         : outcome.code === FAILURE_CODES.tooLarge
           ? 413
           : outcome.code === FAILURE_CODES.unsupported
+              || outcome.code === FAILURE_CODES.clipboardUnavailable
             ? 422
             : 500
   sendJson(res, status, {
@@ -223,6 +235,27 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  // Clipboard capability follows the same probe-once pattern for the same
+  // reason: on Windows the probe spawns PowerShell, which is far too expensive
+  // to repeat on every menu open.
+  let clipboardCapability
+  const clipboardCapabilities = async () => {
+    if (clipboardCapability === undefined) {
+      clipboardCapability = probeClipboard()
+    }
+    return clipboardCapability
+  }
+  // Same cache-poisoning guard as the trash probe: a rejected probe is dropped
+  // so the next call retries instead of reporting a permanent false.
+  const clipboardCapabilitiesSafe = async () => {
+    try {
+      return await clipboardCapabilities()
+    } catch (error) {
+      clipboardCapability = undefined
+      return { supported: false, strategy: 'none', reason: String(error?.message ?? error) }
+    }
+  }
+
   /**
    * Answer an untrusted request; true when it was already rejected.
    *
@@ -276,6 +309,7 @@ export function apply(ctx, config = {}) {
   /** GET /capabilities — what this host can do, plus platform facts. */
   const capabilitiesHandler = route('GET', async (_req, res) => {
     const trash = await capabilitiesSafe()
+    const clipboard = await clipboardCapabilitiesSafe()
     sendJson(res, 200, {
       ok: true,
       value: {
@@ -287,6 +321,13 @@ export function apply(ctx, config = {}) {
         // The save-as flow uses the native directory picker plus a name field,
         // because dsh's desktop shell exposes no save dialog.
         saveAs: 'directory-picker',
+        // The OS file-drop clipboard. A headless host legitimately has none, so
+        // the Client hides the clipboard actions rather than showing a failure.
+        clipboard: {
+          supported: clipboard.supported,
+          strategy: clipboard.strategy,
+          reason: clipboard.reason,
+        },
       },
     })
   })
@@ -419,6 +460,141 @@ export function apply(ctx, config = {}) {
   })
 
   /**
+   * GET /clipboard-read — the operating-system clipboard's file drop list.
+   *
+   * A headless host has no clipboard and that is not an error: the answer is
+   * `supported: false` with a reason, so the Sidebar can hide the action.
+   *
+   * The clipboard is a HOST-WIDE resource, not a workspace one: it holds
+   * whatever the user last copied in any application. Reading it therefore
+   * carries the same loopback fence as `copy-out`, and for the same reason — a
+   * remote browser session must not be able to inspect the host machine's
+   * clipboard contents. The plain-text flavour is additionally withheld from
+   * every response, because this plugin's feature needs only the file list: a
+   * mounted plugin route must not become a way to read arbitrary copied text.
+   */
+  const clipboardReadHandler = route('GET', async (req, res) => {
+    if (!isLoopbackRequest(req)) {
+      sendFailure(res, {
+        code: FAILURE_CODES.outsideWorkspace,
+        message: 'reading the clipboard is only allowed from the host machine itself',
+        details: { loopbackRequired: true },
+      })
+      return
+    }
+    const outcome = await readClipboard()
+    if (!outcome.ok) {
+      sendFailure(res, outcome)
+      return
+    }
+    // Withhold the text flavour unconditionally: the feature consumes `files`.
+    sendJson(res, 200, { ok: true, value: { ...outcome.value, text: null } })
+  })
+
+  /**
+   * POST /clipboard-write — put absolute paths on the clipboard as a file list.
+   *
+   * Loopback-fenced like `clipboard-read`: writing the host's clipboard is a
+   * machine-wide side effect that a remote browser session must not trigger.
+   */
+  const clipboardWriteHandler = route('POST', async (req, res) => {
+    if (!isLoopbackRequest(req)) {
+      sendFailure(res, {
+        code: FAILURE_CODES.outsideWorkspace,
+        message: 'writing the clipboard is only allowed from the host machine itself',
+        details: { loopbackRequired: true },
+      })
+      return
+    }
+    const body = await readJsonBody(req)
+    if (body === null) {
+      sendJson(res, 400, { ok: false, code: FAILURE_CODES.operationFailed, message: 'the request body is not JSON', details: {} })
+      return
+    }
+    const outcome = await writeClipboard(body.paths)
+    if (outcome.ok) sendJson(res, 200, outcome)
+    else sendFailure(res, outcome)
+  })
+
+  /**
+   * POST /copy-out — copy workspace entries to a free-form destination.
+   *
+   * This crosses the workspace fence in the destination direction, so it carries
+   * the same loopback fence as `update-apply`: a remote browser session must not
+   * be able to dump the workspace onto a path of its choosing. The source stays
+   * fenced, so nothing the page was not already allowed to read can be copied.
+   */
+  const copyOutHandler = route('POST', async (req, res) => {
+    if (!isLoopbackRequest(req)) {
+      sendFailure(res, {
+        code: FAILURE_CODES.outsideWorkspace,
+        message: 'copying out is only allowed from the host machine itself',
+        details: { loopbackRequired: true },
+      })
+      return
+    }
+    const body = await readJsonBody(req)
+    if (body === null) {
+      sendJson(res, 400, { ok: false, code: FAILURE_CODES.operationFailed, message: 'the request body is not JSON', details: {} })
+      return
+    }
+    const fence = fenceFor(ctx, body)
+    if (fence.refusal !== undefined) {
+      sendFailure(res, fence.refusal)
+      return
+    }
+    const outcome = await copyOut(
+      body.paths,
+      {
+        destination: body?.options?.destination,
+        collision: body?.options?.collision,
+        maxBytes: body?.options?.maxBytes,
+      },
+      fence.root,
+    )
+    if (outcome.ok) sendJson(res, 200, outcome)
+    else sendFailure(res, outcome)
+  })
+
+  /**
+   * POST /paste-in — copy operating-system entries into a workspace directory.
+   *
+   * Crosses the fence in the source direction, so the destination stays fenced
+   * and the loopback rule applies for the same reason as `copy-out`.
+   */
+  const pasteInHandler = route('POST', async (req, res) => {
+    if (!isLoopbackRequest(req)) {
+      sendFailure(res, {
+        code: FAILURE_CODES.outsideWorkspace,
+        message: 'pasting in is only allowed from the host machine itself',
+        details: { loopbackRequired: true },
+      })
+      return
+    }
+    const body = await readJsonBody(req)
+    if (body === null) {
+      sendJson(res, 400, { ok: false, code: FAILURE_CODES.operationFailed, message: 'the request body is not JSON', details: {} })
+      return
+    }
+    const fence = fenceFor(ctx, body)
+    if (fence.refusal !== undefined) {
+      sendFailure(res, fence.refusal)
+      return
+    }
+    const outcome = await pasteIn(
+      body.directory,
+      {
+        sourcePaths: body?.options?.sourcePaths,
+        collision: body?.options?.collision,
+        maxBytes: body?.options?.maxBytes,
+      },
+      fence.root,
+    )
+    if (outcome.ok) sendJson(res, 200, outcome)
+    else sendFailure(res, outcome)
+  })
+
+  /**
    * GET /update-check — which version is installed, and which one GitHub offers.
    *
    * Reads GitHub only; it never touches the installed package, so it is safe to
@@ -475,6 +651,10 @@ export function apply(ctx, config = {}) {
     ['copy', copyHandler],
     ['download', downloadHandler],
     ['create', createHandler],
+    ['clipboard-read', clipboardReadHandler],
+    ['clipboard-write', clipboardWriteHandler],
+    ['copy-out', copyOutHandler],
+    ['paste-in', pasteInHandler],
     ['update-check', updateCheckHandler],
     ['update-apply', updateApplyHandler],
   ]

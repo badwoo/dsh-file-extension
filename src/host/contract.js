@@ -24,6 +24,10 @@ export const METHOD_NAMES = [
   'copyTo',
   'pickSaveDirectory',
   'readForDownload',
+  'clipboardRead',
+  'clipboardWrite',
+  'copyOut',
+  'pasteIn',
 ]
 
 /**
@@ -66,6 +70,18 @@ export function createInvocationDescriptors() {
     ]),
     describe('readForDownload', [
       pathParam,
+      { name: 'options', wire: 'options', source: 'json', codec: json },
+    ]),
+    describe('clipboardRead', []),
+    describe('clipboardWrite', [
+      { name: 'paths', wire: 'paths', source: 'json', codec: json },
+    ]),
+    describe('copyOut', [
+      { name: 'paths', wire: 'paths', source: 'json', codec: json },
+      { name: 'options', wire: 'options', source: 'json', codec: json },
+    ]),
+    describe('pasteIn', [
+      { name: 'directory', wire: 'directory', source: 'json', codec: json },
       { name: 'options', wire: 'options', source: 'json', codec: json },
     ]),
   ])
@@ -122,7 +138,54 @@ export const FAILURE_CODES = Object.freeze({
   updateUnavailable: 'file-extension/update-unavailable',
   updateFailed: 'file-extension/update-failed',
   restartRequired: 'file-extension/restart-required',
+  clipboardEmpty: 'file-extension/clipboard-empty',
+  clipboardUnavailable: 'file-extension/clipboard-unavailable',
+  selfNested: 'file-extension/self-nested',
 })
+
+/**
+ * The one place requirement 2 deliberately crosses the workspace fence, and the
+ * rule that keeps it from becoming a general filesystem API for the page.
+ *
+ * Every pre-existing route is fenced: a request can only ever touch a path
+ * inside the Session's own workspace. Copying "to another place on the computer"
+ * cannot work under that rule, so it is relaxed for exactly two directions and
+ * tightened in every other respect:
+ *
+ *  - **copy out** (`copyOut`): the SOURCE must still be inside the workspace, so
+ *    the page can never use this route to read a file it was not already
+ *    allowed to read. The DESTINATION is free-form, because that is the feature.
+ *  - **paste in** (`pasteIn`): the DESTINATION must be inside the workspace, so
+ *    the page cannot write anywhere else. The SOURCE comes from the operating
+ *    system clipboard, which the user themselves populated.
+ *
+ * The four clipboard/transfer routes additionally require the request to come
+ * from the host machine's own loopback connection, matching the existing
+ * `update-apply` rule. This is not redundant with the path fences above: the
+ * clipboard is a HOST-WIDE resource that holds whatever the user last copied in
+ * any application, so reading or writing it is a machine-wide side effect rather
+ * than a workspace-scoped one. A remote browser session must not be able to
+ * inspect the host's clipboard, trigger a copy onto it, or use either transfer
+ * direction to move data off a machine it is not running on.
+ */
+export const CROSS_FENCE_ROUTES = Object.freeze([
+  'copyOut',
+  'pasteIn',
+  'clipboardRead',
+  'clipboardWrite',
+])
+
+/** Largest number of entries one clipboard operation may carry. */
+export const MAX_CLIPBOARD_ENTRIES = 200
+
+/**
+ * How a cross-fence transfer resolves a name collision at the destination.
+ *
+ * `rename` is the default and is what a file manager's paste does: the newcomer
+ * becomes `name (2).ext` rather than silently replacing something. `overwrite`
+ * and `skip` remain explicit caller choices.
+ */
+export const COLLISION_MODES = Object.freeze(['rename', 'overwrite', 'skip'])
 
 /**
  * Characters Windows forbids in a file name, plus the reserved device names.
@@ -179,4 +242,56 @@ export function splitFileName(name) {
 export function buildCopyName(name, copyWord) {
   const { stem, extension } = splitFileName(name)
   return `${stem}-${copyWord}${extension}`
+}
+
+/**
+ * Build the nth collision-free name for `name`, the way a file manager does.
+ *
+ * `report.txt` -> `report (2).txt` -> `report (3).txt`. The extension is kept
+ * attached so double-clicking still opens with the right application, and a
+ * dotfile (`.gitignore`) is treated as all-stem so it does not become
+ * ` (2).gitignore`.
+ *
+ * @param {string} name - the requested name.
+ * @param {number} copyIndex - 2 for the first duplicate, 3 for the next, and so on.
+ * @returns {string} the candidate name.
+ */
+export function withCopyIndex(name, copyIndex) {
+  const { stem, extension } = splitFileName(name)
+  return `${stem} (${String(copyIndex)})${extension}`
+}
+
+/**
+ * Normalize a caller-supplied list of absolute paths.
+ *
+ * Returns the accepted paths plus, for each rejected one, the reason — so the
+ * Client can render "3 of 5 copied" instead of failing the whole operation
+ * because one entry vanished between listing and copying.
+ *
+ * This does NOT test containment: each direction applies its own fence rule.
+ *
+ * @param {unknown} value - the caller's `paths`.
+ * @param {number} [limit] - maximum accepted entries.
+ * @returns {{ accepted: string[], rejected: { path: string, reason: string }[] }} the split.
+ */
+export function normalizePathList(value, limit = MAX_CLIPBOARD_ENTRIES) {
+  const accepted = []
+  const rejected = []
+  if (!Array.isArray(value)) {
+    return { accepted, rejected: [{ path: '', reason: 'notAList' }] }
+  }
+  for (const candidate of value) {
+    if (typeof candidate !== 'string' || candidate.trim() === '') {
+      rejected.push({ path: '', reason: 'invalid' })
+      continue
+    }
+    const trimmed = candidate.trim()
+    if (accepted.includes(trimmed)) continue
+    if (accepted.length >= limit) {
+      rejected.push({ path: trimmed, reason: 'tooMany' })
+      continue
+    }
+    accepted.push(trimmed)
+  }
+  return { accepted, rejected }
 }
