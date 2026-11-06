@@ -27,6 +27,31 @@ const ROUTE_PREFIX = '/api/dsh-file-extension/'
 /** Largest request body any route accepts; these payloads are tiny JSON objects. */
 const MAX_BODY_BYTES = 64 * 1024
 
+/**
+ * Whether this request asks to bypass a cached answer.
+ *
+ * Uses the raw query string rather than a parsed URL object so a malformed
+ * request degrades to "not forced" instead of throwing.
+ *
+ * @param {import('node:http').IncomingMessage} req - the request.
+ * @returns {boolean} true when `?force=1` (or `true`) is present.
+ */
+function requestWantsForce(req) {
+  try {
+    const url = req?.url
+    if (typeof url !== 'string') return false
+    const query = url.includes('?') ? url.slice(url.indexOf('?') + 1) : ''
+    for (const pair of query.split('&')) {
+      const [key, value] = pair.split('=')
+      if (key !== 'force') continue
+      return value === undefined || value === '' || value === '1' || value === 'true'
+    }
+    return false
+  } catch {
+    return false
+  }
+}
+
 /** Services this plugin needs. `webServer` and `connection` are optional so the
  * plugin stays inert (rather than throwing) in a composition without a browser. */
 export const inject = ['webServer', 'connection']
@@ -599,9 +624,14 @@ export function apply(ctx, config = {}) {
    *
    * Reads GitHub only; it never touches the installed package, so it is safe to
    * call from any authorized browser session.
+   *
+   * `?force=1` bypasses the in-process cache. The dialog's "check again" button
+   * sends it: without a bypass that button re-reads a cached answer and appears
+   * to do nothing, which is indistinguishable from "there is no update".
    */
-  const updateCheckHandler = route('GET', async (_req, res) => {
-    const outcome = await checkForUpdate()
+  const updateCheckHandler = route('GET', async (req, res) => {
+    const force = requestWantsForce(req)
+    const outcome = await checkForUpdate({ force })
     if (outcome.ok) {
       sendJson(res, 200, outcome)
       return
@@ -609,9 +639,24 @@ export function apply(ctx, config = {}) {
     // A check that could not reach GitHub is not an HTTP error: the caller wants
     // the reason rendered, not a failed request. The plugin's own code is kept in
     // `details` so the Client can still branch on it.
+    //
+    // `hasUpdate`/`upToDate` are deliberately NULL here, never `false`/`true`.
+    // A failed check knows nothing about whether an update exists, and an earlier
+    // version of this route answered `hasUpdate: false`, which the dialog rendered
+    // as "you are on the latest release" — reporting the opposite of the truth,
+    // and hiding the very network failure the user needed to see. `checked: false`
+    // states plainly that this is an unanswered question.
     sendJson(res, 200, {
       ok: true,
-      value: { current: outcome.details?.current, latest: null, hasUpdate: false, upToDate: null, error: outcome.message, code: outcome.code },
+      value: {
+        current: outcome.details?.current ?? null,
+        latest: null,
+        hasUpdate: null,
+        upToDate: null,
+        checked: false,
+        error: outcome.message,
+        code: outcome.code,
+      },
     })
   })
 

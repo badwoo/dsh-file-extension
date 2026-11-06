@@ -265,6 +265,30 @@ second explicit confirmation.
 6. **Two files can race.** The Host refuses to overwrite an existing target, but
    a file created between the check and the write can still be replaced by the
    OS-level copy. This is the same window every save dialog has.
+7. **The update check needs to reach GitHub.** Behind a TLS-intercepting proxy
+   (common on corporate networks) Node's built-in CA bundle may not be able to
+   verify `api.github.com`. The plugin then **retries once against the operating
+   system trust store** — still verifying, never disabling verification — so on a
+   machine whose OS trusts the proxy's root certificate it usually works with no
+   extra configuration. Only when the OS trust store rejects it too does the check
+   report a readable failure (no crash, no silence); setting `NODE_EXTRA_CA_CERTS`
+   to the corporate root certificate fixes that.
+
+   > **A failed check is never "you are up to date."** This was a real defect: the
+   > failure response hard-coded `hasUpdate: false`, so the dialog said "you are
+   > on the latest release" — turning "unknown" into "nothing to install" and
+   > hiding the very failure the user needed to see. Failures now return
+   > `hasUpdate: null` / `checked: false`, and the dialog states that the check
+   > could not be completed, together with the reason.
+8. **In-place update depends on the deployment.** The update is delegated to the
+   Harness's `pluginManager`; when it is unavailable or refuses (hot reload active,
+   package files locked by the process), the dialog shows a copyable command
+   rather than claiming success.
+9. **Anonymous GitHub API rate limit.** The check uses the public GitHub API,
+   which allows 60 requests/hour per egress IP without a token. Repeated
+   "check again" clicks can hit that limit; the dialog then says
+   "GitHub refused the request (HTTP 403) — the API rate limit was reached, try
+   again later" instead of treating it as up to date.
 
 ---
 

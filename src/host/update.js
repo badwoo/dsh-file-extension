@@ -31,6 +31,8 @@
 import { createRequire } from 'node:module'
 import { existsSync, readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
+import https from 'node:https'
+import tls from 'node:tls'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { FAILURE_CODES } from './contract.js'
@@ -62,6 +64,14 @@ const DEFAULT_TIMEOUT_MS = 10 * 1000
 
 /** Longest release-note body carried to the browser, in characters. */
 const MAX_NOTES_CHARS = 8000
+
+/**
+ * Largest response body this module will accumulate, in characters.
+ *
+ * The endpoints it reads answer a few kilobytes. A bound exists so a
+ * misbehaving or hostile endpoint cannot grow the Host's memory without limit.
+ */
+const MAX_RESPONSE_CHARS = 512 * 1024
 
 /**
  * Build one failure outcome.
@@ -312,6 +322,174 @@ export function invalidateUpdateCache() {
  * @throws {Error} on a transport failure, an abort, or a non-JSON body.
  */
 async function fetchJson(url, fetchImpl, timeoutMs) {
+  try {
+    return await fetchJsonWithFetch(url, fetchImpl, timeoutMs)
+  } catch (error) {
+    // A TLS verification failure means Node's BUILT-IN CA bundle cannot verify
+    // the certificate — not that the certificate is wrong. This is the normal
+    // state on a machine behind a TLS-intercepting corporate proxy, and it is
+    // what made the desktop app answer "check failed" while a browser on the
+    // same machine reached GitHub fine.
+    //
+    // The operating system's own trust store is the correct authority for that
+    // case, so retry once against it — still verifying, never disabling
+    // verification. Only TLS failures are retried: an HTTP status error is a
+    // real answer from GitHub and must not be re-requested.
+    if (!isTlsVerificationFailure(error)) throw error
+    return await fetchJsonWithSystemCa(url, timeoutMs)
+  }
+}
+
+/**
+ * Whether an error is a local certificate-verification failure.
+ *
+ * These are the codes Node raises when its trust store cannot validate the
+ * peer: `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, an unknown/self-signed authority, an
+ * expired-at-the-root chain, or a hostname mismatch. A DNS or connection error
+ * is NOT one of them — retrying those against the system store would be a
+ * pointless second network attempt.
+ *
+ * @param {unknown} error - the caught value.
+ * @returns {boolean} true when the certificate could not be verified locally.
+ */
+function isTlsVerificationFailure(error) {
+  const code = error?.cause?.code ?? error?.code
+  if (typeof code !== 'string') return false
+  return code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'
+    || code === 'SELF_SIGNED_CERT_IN_CHAIN'
+    || code === 'DEPTH_ZERO_SELF_SIGNED_CERT'
+    || code === 'CERT_HAS_EXPIRED'
+    || code === 'ERR_TLS_CERT_ALTNAME_INVALID'
+}
+
+/**
+ * The operating system's CA certificates, when this Node build exposes them.
+ *
+ * `tls.getCACertificates('system')` reads the platform trust store (the Windows
+ * certificate store, the macOS keychain through `security`, or the OpenSSL
+ * default paths). It returns an empty array on a build that does not support it,
+ * which is a legitimate outcome and simply leaves the call to fail with the
+ * original error.
+ *
+ * @returns {string[]} the PEM certificates, or an empty array.
+ */
+function systemCaCertificates() {
+  try {
+    if (typeof tls.getCACertificates !== 'function') return []
+    const certs = tls.getCACertificates('system')
+    return Array.isArray(certs) ? certs : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Repeat one GET against the operating system's trust store.
+ *
+ * Uses `node:https` because it accepts an explicit `ca` list per request, where
+ * `fetch` offers no way to name a trust store. Verification stays ON: this
+ * narrows *which* authorities are trusted, it does not skip the check.
+ *
+ * @param {string} url - absolute request URL.
+ * @param {number} timeoutMs - hard bound on the request.
+ * @returns {Promise<{ status: number, body: unknown }>} the decoded response.
+ * @throws {Error} on any transport, TLS, HTTP, or parse failure.
+ */
+async function fetchJsonWithSystemCa(url, timeoutMs) {
+  const ca = systemCaCertificates()
+  if (ca.length === 0) {
+    const error = new Error('the operating system trust store is not readable from this Host')
+    error.cause = { code: 'SYSTEM_CA_UNAVAILABLE' }
+    throw error
+  }
+  const text = await new Promise((resolve, reject) => {
+    let settled = false
+    let request
+    /**
+     * Settle exactly once, and always release the request.
+     *
+     * `request.destroy()` is called on every path so a late-arriving chunk can
+     * never resolve a promise whose deadline already fired.
+     *
+     * @param {Error | null} error - the failure, or null for success.
+     * @param {unknown} value - the decoded body on success.
+     */
+    const settle = (error, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(deadline)
+      if (error !== null) {
+        reject(error)
+        return
+      }
+      resolve(value)
+    }
+
+    // A hard overall deadline, not just an idle-socket one: a body that keeps
+    // trickling bytes would reset `timeout` forever and never fire it.
+    const deadline = setTimeout(() => {
+      try {
+        request?.destroy()
+      } catch {
+        // The request may never have been created; nothing to release.
+      }
+      settle(new Error('the request to GitHub timed out'), undefined)
+    }, timeoutMs)
+
+    request = https.request(url, {
+      method: 'GET',
+      headers: {
+        'user-agent': 'dsh-file-extension-update-check',
+        accept: 'application/vnd.github+json',
+      },
+      ca,
+      timeout: timeoutMs,
+    }, (response) => {
+      const status = response.statusCode ?? 0
+      let body = ''
+      response.setEncoding('utf8')
+      response.on('data', (chunk) => {
+        // Bound the read: these documents are small, and an unexpected stream
+        // must not be able to grow the Host's memory without limit.
+        if (body.length < MAX_RESPONSE_CHARS) body += chunk
+      })
+      response.on('end', () => {
+        if (status !== 200) {
+          const error = new Error(`HTTP ${String(status)}`)
+          error.status = status
+          error.body = body
+          settle(error, undefined)
+          return
+        }
+        try {
+          settle(null, body === '' ? null : JSON.parse(body))
+        } catch (parseError) {
+          settle(parseError, undefined)
+        }
+      })
+      response.on('error', (error) => settle(error, undefined))
+    })
+
+    request.on('timeout', () => {
+      request.destroy()
+      settle(new Error('the request to GitHub timed out'), undefined)
+    })
+    request.on('error', (error) => settle(error, undefined))
+    request.end()
+  })
+  return { status: 200, body: text }
+}
+
+/**
+ * Run one `fetch` GET and decode it into the shape {@link fetchJson} returns.
+ *
+ * @param {string} url - absolute request URL.
+ * @param {typeof fetch} fetchImpl - the fetch implementation to use.
+ * @param {number} timeoutMs - hard bound on the request.
+ * @returns {Promise<{ status: number, body: unknown }>} the decoded response.
+ * @throws {Error} on a transport failure, an abort, or a non-JSON body.
+ */
+async function fetchJsonWithFetch(url, fetchImpl, timeoutMs) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
@@ -391,6 +569,15 @@ async function fetchLatestRelease(fetchImpl, timeoutMs) {
  */
 function describeFetchFailure(error) {
   if (error?.name === 'AbortError') return 'the request to GitHub timed out'
+  const tlsCode = error?.cause?.code ?? error?.code
+  if (typeof tlsCode === 'string' && isTlsVerificationFailure({ cause: { code: tlsCode } })) {
+    // Name the real problem. "fetch failed" sent the user looking at the plugin
+    // for a defect that lives in the local certificate trust chain.
+    return `the TLS certificate for api.github.com could not be verified (${tlsCode}) — `
+      + 'neither Node\'s built-in CA bundle nor the operating system trust store accepted it. '
+      + 'A TLS-intercepting proxy or a missing corporate root certificate causes this; '
+      + 'install the root certificate, or run dsh with --use-system-ca'
+  }
   const status = error?.status
   if (typeof status === 'number') {
     if (status === 403 || status === 429) {
@@ -399,7 +586,10 @@ function describeFetchFailure(error) {
     if (status === 404) return 'GitHub reported no releases or tags for this repository (HTTP 404)'
     return `GitHub answered HTTP ${String(status)}`
   }
-  return `the request to GitHub failed: ${String(error?.message ?? error)}`
+  const cause = error?.cause?.code ?? error?.cause?.message
+  return cause === undefined
+    ? `the request to GitHub failed: ${String(error?.message ?? error)}`
+    : `the request to GitHub failed: ${String(cause)}`
 }
 
 /**
@@ -468,81 +658,34 @@ export async function checkForUpdate(options = {}) {
     return outcome
   }
 
-  // One extra request, inside the same cache window. A `github:` installation
-  // pins a COMMIT, not a version, so the newest release tag is not by itself
-  // proof of what this profile is running; the branch's newest commit is the
-  // one fact versions cannot express. It refines the answer and never replaces
-  // it, so a repository that cannot be reached simply leaves it out.
-  const git = await inspectDrift(fetchImpl, timeoutMs)
-
   const order = compareVersions(newest.latest, current)
-  const hasUpdate = order === null ? false : order > 0
+  // `null` means the two versions could not be compared at all. That is an
+  // unanswered question, not a "no": reporting `hasUpdate: false` here would be
+  // the same class of lie the failed-check response used to tell.
+  const comparable = order !== null
+  const hasUpdate = comparable ? order > 0 : null
   const value = {
     current,
     latest: newest.latest,
     hasUpdate,
+    // `checked` says the question was answered; `hasUpdate: null` says it could
+    // not be. The dialog keys on these rather than inferring "up to date" from a
+    // falsy value.
+    checked: comparable,
     source: newest.source,
     releaseUrl: newest.releaseUrl,
     notes: newest.notes,
     publishedAt: newest.publishedAt,
     checkedAt: new Date(now()).toISOString(),
-    upToDate: !hasUpdate,
+    upToDate: comparable ? !hasUpdate : null,
     cached: false,
     cacheAgeMs: 0,
-    ...(git === null ? {} : { git }),
-    note: order === null
-      ? `versions could not be compared semantically (installed ${current}, latest ${newest.latest})`
-      : null,
+    note: comparable
+      ? null
+      : `versions could not be compared semantically (installed ${current}, latest ${newest.latest})`,
   }
   cachedCheck = { at: now(), value: success(value) }
   return success(value)
-}
-
-/**
- * GitHub API endpoint for the repository's newest commit.
- *
- * Only reached when the plan can and should be read; it is kept in one named
- * constant so the network surface of this module stays enumerable at a glance.
- */
-const COMMITS_ENDPOINT = `${GITHUB_API}/repos/${GITHUB_REPO}/commits?per_page=1`
-
-/**
- * Compare the newest release tag with the newest branch commit.
- *
- * A `github:` installation pins a **commit**, not a version, so a profile can be
- * running the same version number as the latest release while still missing that
- * release's commit — and, more importantly, the reverse is impossible to see from
- * versions alone. This reads only public commit metadata (a SHA and its date) and
- * never the profile's own lockfile, which the Host cannot portably read.
- *
- * Failure here is never fatal: the answer is a *refinement* of the version
- * comparison, so an unreachable repository degrades to `null` and the caller
- * reports the version facts alone.
- *
- * @param {typeof fetch} fetchImpl - the fetch implementation to use.
- * @param {number} timeoutMs - hard bound on the request.
- * @returns {Promise<{ branch: string, head: string, headDate: string | null, state: 'behind' | 'unknown' } | null>} the comparison, or null when unknown.
- */
-async function inspectDrift(fetchImpl, timeoutMs) {
-  let head
-  try {
-    const { body } = await fetchJson(COMMITS_ENDPOINT, fetchImpl, timeoutMs)
-    if (!Array.isArray(body) || body.length === 0) return null
-    head = body[0]
-  } catch {
-    // A repository with no commits, or no network: not a reportable failure.
-    return null
-  }
-  const sha = typeof head?.sha === 'string' ? head.sha : null
-  if (sha === null) return null
-  return {
-    branch: 'default',
-    head: sha.slice(0, 7),
-    headDate: typeof head?.commit?.committer?.date === 'string' ? head.commit.committer.date : null,
-    // Without the profile's own pin the plugin cannot prove it is behind, only
-    // that a newer commit exists on the branch. `unknown` keeps it honest.
-    state: 'unknown',
-  }
 }
 
 /**

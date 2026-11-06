@@ -54,11 +54,14 @@ async function post(method, body, signal) {
  *
  * @param {string} method - route name after the prefix.
  * @param {AbortSignal} [signal] - caller lifetime.
+ * @param {boolean} [force] - append `?force=1`, asking the Host to bypass its
+ *   in-process cache. Used by the dialog's "check again" button: without it that
+ *   button re-reads a cached answer and looks like it did nothing.
  * @returns {Promise<ApiSuccess | ApiFailure>} the settled result.
  */
-async function get(method, signal) {
+async function get(method, signal, force = false) {
   try {
-    const response = await fetch(`${BASE}${method}`, {
+    const response = await fetch(`${BASE}${method}${force ? '?force=1' : ''}`, {
       method: 'GET',
       credentials: 'same-origin',
       signal,
@@ -189,7 +192,7 @@ export const api = {
   /** Put paths on the host's OS clipboard as a file drop list. */
   clipboardWrite: (paths) => post('clipboard-write', { paths }),
   /** Read the installed and available plugin versions. */
-  updateCheck: () => get('update-check'),
+  updateCheck: (options) => get('update-check', undefined, options?.force === true),
   /** Install the newest release of this plugin. */
   updateApply: (sessionId, spec) => post('update-apply', { sessionId, spec }),
 }

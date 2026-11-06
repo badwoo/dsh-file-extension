@@ -484,7 +484,7 @@ function renderDialog(state, controller, t) {
       message: dialog.message ?? null,
       busy: state.updateBusy === true,
       onApply: () => controller.applyUpdate(),
-      onRecheck: () => controller.checkUpdate(),
+      onRecheck: () => controller.checkUpdate({ force: true }),
       onCancel: () => controller.closeDialog(),
       t,
     })

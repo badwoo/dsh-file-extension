@@ -323,6 +323,21 @@ export function UpdateDialog({ stage, info, message, busy, onApply, onRecheck, o
     }))
   } else if (info?.hasUpdate === true) {
     body.push(jsx('p', { key: 'state', className: 'dfx-dialog-body', children: t('dialog.update.available') }))
+  } else if (info?.hasUpdate === null || info?.checked === false) {
+    // The question was not answered — GitHub could not be consulted, or the two
+    // versions could not be compared. This must never fall through to the
+    // "up to date" branch below: that is the bug that told a user on 0.2.0 that
+    // 0.2.0 was the latest release while 0.3.0 was already published.
+    body.push(jsx('p', {
+      key: 'state',
+      className: 'dfx-dialog-body',
+      'data-danger': 'true',
+      'data-dfx-update-unresolved': 'true',
+      children: t('dialog.update.unresolved'),
+    }))
+    if (typeof info?.note === 'string' && info.note !== '') {
+      body.push(jsx('p', { key: 'unresolvedNote', className: 'dfx-dialog-body', children: info.note }))
+    }
   } else if (info?.upToDate === true || info?.hasUpdate === false) {
     body.push(jsx('p', { key: 'state', className: 'dfx-dialog-body', children: t('dialog.update.upToDate') }))
   }

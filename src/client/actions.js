@@ -739,21 +739,40 @@ export function createController(deps) {
    * Host answers: a click that appears to do nothing for a second is worse than
    * one that visibly says it is asking.
    */
-  const checkUpdate = async () => {
+  const checkUpdate = async (options = {}) => {
     store.set({ dialog: { kind: 'update', stage: 'checking' }, updateBusy: true })
-    const result = await api.updateCheck()
+    const result = await api.updateCheck(options)
     store.set({ updateBusy: false })
     if (!result.ok) {
       store.set({ dialog: { kind: 'update', stage: 'error', message: describeFailure(result) } })
+      return
+    }
+    // A Host that answered with `checked: false` did not settle the question —
+    // it reports why GitHub could not be consulted. That is an ERROR state, not
+    // "up to date": rendering it as the latter told the user the opposite of the
+    // truth and hid the network failure they needed to act on.
+    if (result.value.checked === false || result.value.error !== undefined) {
+      const message = String(result.value.error ?? t('dialog.update.failed', { message: '' }))
+      store.set({
+        update: result.value,
+        dialog: { kind: 'update', stage: 'error', info: result.value, message },
+      })
+      return
+    }
+    // Versions that could not be compared are also not an answer. Reachable when
+    // the release tag is not semver, in which case `checked` is false and has
+    // already been handled above; kept as a guard for a future Host.
+    if (result.value.hasUpdate === null) {
+      store.set({
+        update: result.value,
+        dialog: { kind: 'update', stage: 'error', info: result.value, message: String(result.value.note ?? '') },
+      })
       return
     }
     store.set({
       update: result.value,
       dialog: { kind: 'update', stage: 'ready', info: result.value },
     })
-    if (result.value.error !== undefined) {
-      store.set({ dialog: { kind: 'update', stage: 'error', message: String(result.value.error) } })
-    }
   }
 
   /**

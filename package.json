@@ -1,6 +1,6 @@
 {
   "name": "dsh-file-extension",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "文件操作功能扩展：为 DeepSeek Harness 右侧栏文件条目补全 Trae 风格操作（在文件管理器中显示、添加到对话、另存为、复制路径、重命名、回收站删除），并与电脑其他位置双向复制粘贴文件和文件夹",
   "license": "MIT",
   "type": "module",

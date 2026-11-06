@@ -82,6 +82,7 @@ export const en = {
   'dialog.update.manualUnusable': 'This profile is managed by the desktop application, so the command cannot be run here. Update the plugin from the application\u2019s plugin settings instead.',
   'dialog.update.restart': 'The update is installed. Restart the harness to load it.',
   'dialog.update.failed': 'The check failed: {message}',
+  'dialog.update.unresolved': 'The update check could not be completed, so it is unknown whether a newer release exists. This is NOT a statement that you are up to date.',
   'dialog.update.recheck': 'Check Again',
 
   'dialog.delete.title': 'Delete “{name}”?',
@@ -232,6 +233,7 @@ export const zh = {
   'dialog.update.manualUnusable': '当前 profile 由桌面应用托管，无法在此执行该命令。请在应用的插件设置中更新。',
   'dialog.update.restart': '更新已安装，请重启 harness 以加载新版本。',
   'dialog.update.failed': '检查失败：{message}',
+  'dialog.update.unresolved': '检查未能完成，因此无法确定是否有新版本。这不代表当前已是最新版本。',
   'dialog.update.recheck': '重新检查',
 
   'dialog.delete.title': '删除「{name}」？',
